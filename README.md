@@ -219,3 +219,63 @@ Workaround GRUB temporar:
 - Rulează `post-migration.sh --verbose` dacă vrei să vezi exact ce face `update-initramfs` / `update-grub`.
 
 ---
+
+## 8. ⚠️ Troubleshooting
+
+### Sistemul nu pornește după migrare (rămâne în prompt GRUB)
+
+**Cauză**: Dacă discul destinație era conectat prin USB în timpul migrării și l-ai mutat intern după aceea, GRUB trebuie reinstalat.
+
+**Context**: Când migrezi pe un disc USB și apoi îl muți intern, device mapping-ul GRUB (de ex. `/dev/sdb` devine `/dev/sda`) și configurația NVRAM UEFI pot fi incorecte, rezultând în eșec la boot.
+
+**Soluție automată**:
+1. Bootează de pe un USB Live Linux
+2. Rulează scriptul generat automat:
+   ```bash
+   sudo bash /mnt/newroot/root/storage-migrate-backups/reinstall-grub-after-move.sh
+   ```
+
+**Soluție manuală**:
+1. Bootează de pe un USB Live Linux
+2. Identifică partiția root a noului SSD:
+   ```bash
+   lsblk -f
+   # Caută partiția cu label "newroot" sau sistemul de fișiere ext4
+   ```
+3. Montează noul sistem și reinstalează GRUB:
+   ```bash
+   sudo mount /dev/sdaX /mnt        # X = partiția root de pe noul SSD
+   # Pentru UEFI: sudo mount /dev/sdaY /mnt/boot/efi
+   sudo mount --bind /dev /mnt/dev
+   sudo mount --bind /proc /mnt/proc
+   sudo mount --bind /sys /mnt/sys
+   sudo chroot /mnt
+   grub-install /dev/sda           # Pentru BIOS
+   # sau pentru UEFI: grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian
+   update-grub
+   exit
+   ```
+4. Demontează și reboot:
+   ```bash
+   sudo umount /mnt/dev /mnt/proc /mnt/sys
+   # Pentru UEFI: sudo umount /mnt/boot/efi
+   sudo umount /mnt
+   sudo reboot
+   ```
+
+### Migrare pe disc USB - Ce trebuie să știi
+
+Dacă planifici să migrezi pe un disc conectat prin USB și apoi să-l muți intern:
+
+1. **Scriptul va detecta automat** că discul destinație este pe USB și va afișa un avertisment.
+2. **Va genera automat** un script de reinstalare GRUB în `/root/storage-migrate-backups/reinstall-grub-after-move.sh`.
+3. **După migrare**, urmează pașii:
+   - Oprește calculatorul
+   - Mută fizic SSD-ul intern
+   - Bootează de pe USB Live Linux
+   - Rulează scriptul de reinstalare GRUB
+   - Reboot și verifică
+
+**Recomandare**: Dacă este posibil, conectează discul destinație prin SATA în timpul migrării pentru a evita acești pași suplimentari.
+
+---
