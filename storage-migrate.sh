@@ -43,6 +43,7 @@ TARGET_ROOT=""
 TARGET_SWAP=""
 TARGET_EXTRA=""
 TARGET_ROOT_SIZE_GB=0
+TARGET_IS_USB=false
 
 # System detection
 BOOT_MODE=""
@@ -1099,7 +1100,14 @@ migrate_root_disk() {
     if [ -d /boot/efi ] && [ "$(ls -A /boot/efi 2>/dev/null)" ]; then
       log_command rsync -aAXH /boot/efi/ /mnt/newroot/boot/efi/ || true
     fi
-    if ! log_command chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck --no-nvram; then
+    # Dacă TARGET_DISK este USB, folosește --no-nvram pentru a evita erori NVRAM
+    # Utilizatorul va trebui să reinstaleze GRUB după mutarea fizică
+    NVRAM_FLAG=""
+    if [ "${TARGET_IS_USB}" = true ]; then
+      NVRAM_FLAG="--no-nvram"
+      print_warning "Folosim --no-nvram pentru instalarea GRUB (disc pe USB)"
+    fi
+    if ! log_command chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck ${NVRAM_FLAG}; then
       print_error "Eroare la instalare GRUB UEFI"
       cleanup_mounts /mnt/newroot
       return 1
@@ -1501,6 +1509,26 @@ fi
     break
   done
 
+  # Detectare USB și avertisment pentru reinstalare GRUB
+  TARGET_IS_USB=false
+  if lsblk -dno TRAN "${TARGET_DISK}" 2>/dev/null | grep -qE '^usb'; then
+    TARGET_IS_USB=true
+    print_warning "⚠️  Discul destinație ${TARGET_DISK} este conectat prin USB!"
+    echo -e "${YELLOW}${BOLD}IMPORTANT:${NC}"
+    echo -e "  După ce migrarea se termină, va trebui să:"
+    echo -e "  1. Oprești calculatorul complet"
+    echo -e "  2. Muți fizic noul SSD intern (în locul celui vechi)"
+    echo -e "  3. Bootezi de pe un USB Live Linux"
+    echo -e "  4. Reinstalezi GRUB pe noul disc (acum intern):"
+    echo -e "     ${CYAN}sudo grub-install /dev/sda && sudo update-grub${NC}"
+    echo -e "  5. SAU folosești scriptul generat automat care va fi salvat în ${BACKUP_DIR}"
+    echo ""
+    if ! confirm_action "Ai înțeles acești pași și vrei să continui?" "no"; then
+      print_info "Operațiune anulată."
+      exit 0
+    fi
+  fi
+
   if [ "${CHECK_MODE}" = false ]; then
     echo -e "\n${RED}${BOLD}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${RED}${BOLD}║  [!] AVERTISMENT: TOATE DATELE DE PE ${TARGET_DISK} VOR FI ȘTERSE! [!]           ║${NC}"
@@ -1598,6 +1626,72 @@ fi
 
   log_message "=== MIGRATION COMPLETED ==="
 
+  # Generare script de reinstalare GRUB pentru cazul USB
+  if [ "${MIGRATION_TYPE}" != "lvm-only" ] && [ "${TARGET_IS_USB}" = true ]; then
+    print_info "Generare script de reinstalare GRUB pentru discul USB mutat intern..."
+    cat > "${BACKUP_DIR}/reinstall-grub-after-move.sh" <<'REINSTALL_EOF'
+#!/usr/bin/env bash
+# Script generat automat de storage-migrate.sh
+# Rulează acest script DUPĂ ce ai mutat fizic noul SSD intern
+# Bootează de pe USB Live Linux, apoi rulează:
+#   sudo bash /path/to/this/script
+
+set -euo pipefail
+
+echo "=== Reinstalare GRUB după mutarea fizică a discului ==="
+echo ""
+echo "⚠️  Acest script presupune că noul SSD este acum /dev/sda (primul disc intern)"
+echo "⚠️  Verifică cu: lsblk -f"
+echo ""
+read -rp "Continuă? [y/N]: " response
+[[ "$response" =~ ^[Yy]$ ]] || { echo "Anulat."; exit 0; }
+
+NEW_DISK="/dev/sda"  # Ajustează dacă este altceva
+ROOT_PART=$(lsblk -nlo NAME,LABEL,FSTYPE ${NEW_DISK} | awk '$2=="newroot" || $3=="ext4" {print "/dev/"$1; exit}')
+EFI_PART=$(lsblk -nlo NAME,FSTYPE ${NEW_DISK} | awk '$2=="vfat" {print "/dev/"$1; exit}')
+
+[ -z "$ROOT_PART" ] && { echo "Nu am găsit partiția root!"; exit 1; }
+
+echo "Montez $ROOT_PART..."
+mkdir -p /mnt/newroot
+mount "$ROOT_PART" /mnt/newroot
+
+if [ -n "$EFI_PART" ]; then
+  echo "Sistem UEFI detectat. Montez $EFI_PART..."
+  mkdir -p /mnt/newroot/boot/efi
+  mount "$EFI_PART" /mnt/newroot/boot/efi
+fi
+
+for fs in dev proc sys run; do
+  mount --bind "/$fs" "/mnt/newroot/$fs"
+done
+
+echo "Instalez GRUB pe $NEW_DISK..."
+if [ -n "$EFI_PART" ]; then
+  chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck
+else
+  chroot /mnt/newroot grub-install --target=i386-pc --recheck "$NEW_DISK"
+fi
+
+echo "Actualizez configurația GRUB..."
+chroot /mnt/newroot update-grub
+
+echo ""
+echo "✅ GRUB reinstalat cu succes!"
+echo "Poți face reboot acum."
+
+# Cleanup
+for fs in run sys proc dev; do
+  umount "/mnt/newroot/$fs" 2>/dev/null || true
+done
+[ -n "$EFI_PART" ] && umount /mnt/newroot/boot/efi 2>/dev/null || true
+umount /mnt/newroot 2>/dev/null || true
+REINSTALL_EOF
+
+    chmod +x "${BACKUP_DIR}/reinstall-grub-after-move.sh"
+    print_success "Script de reinstalare GRUB salvat: ${BACKUP_DIR}/reinstall-grub-after-move.sh"
+  fi
+
   CURRENT_STEP=$((CURRENT_STEP + 1))
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Rezumat final"
   echo -e "\n${GREEN}${BOLD}✔ MIGRARE COMPLETATĂ CU SUCCES!${NC}\n"
@@ -1618,8 +1712,16 @@ fi
     echo -e "${RED}${BOLD}⚠ CE FACI MAI DEPARTE :${NC}"
     echo -e "  1) Oprește serverul: ${DIM}sudo poweroff${NC}"
     echo -e "  2) Înlocuiește fizic discul: scoate ${SOURCE_DISK} și pune ${TARGET_DISK} în locul său"
-    echo -e "  3) Pornește serverul și verifică boot-ul"
-    echo -e "  4) După boot, verifică: ${DIM}df -h; lsblk; mount | grep ' / '${NC}\n"
+    if [ "${TARGET_IS_USB}" = true ]; then
+      echo -e "  3) ${RED}${BOLD}IMPORTANT${NC}: Bootează de pe USB Live Linux"
+      echo -e "  4) ${RED}${BOLD}Reinstalează GRUB${NC} folosind scriptul generat:"
+      echo -e "     ${CYAN}sudo bash ${BACKUP_DIR}/reinstall-grub-after-move.sh${NC}"
+      echo -e "  5) Pornește serverul și verifică boot-ul"
+      echo -e "  6) După boot, verifică: ${DIM}df -h; lsblk; mount | grep ' / '${NC}\n"
+    else
+      echo -e "  3) Pornește serverul și verifică boot-ul"
+      echo -e "  4) După boot, verifică: ${DIM}df -h; lsblk; mount | grep ' / '${NC}\n"
+    fi
     echo -e "${YELLOW}Nu șterge inca discul ${SOURCE_DISK} nu se stie niciodata :)${NC}\n"
   else
     echo -e "${GREEN}${BOLD}Status LVM final:${NC}"
