@@ -1107,7 +1107,7 @@ migrate_root_disk() {
       NVRAM_FLAG="--no-nvram"
       print_warning "Folosim --no-nvram pentru instalarea GRUB (disc pe USB)"
     fi
-    if ! log_command chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck ${NVRAM_FLAG}; then
+    if ! log_command chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck "${NVRAM_FLAG}"; then
       print_error "Eroare la instalare GRUB UEFI"
       cleanup_mounts /mnt/newroot
       return 1
@@ -1647,8 +1647,8 @@ read -rp "Continuă? [y/N]: " response
 [[ "$response" =~ ^[Yy]$ ]] || { echo "Anulat."; exit 0; }
 
 NEW_DISK="/dev/sda"  # Ajustează dacă este altceva
-ROOT_PART=$(lsblk -nlo NAME,LABEL,FSTYPE ${NEW_DISK} | awk '$2=="newroot" || $3=="ext4" {print "/dev/"$1; exit}')
-EFI_PART=$(lsblk -nlo NAME,FSTYPE ${NEW_DISK} | awk '$2=="vfat" {print "/dev/"$1; exit}')
+ROOT_PART=$(lsblk -nlo NAME,LABEL,FSTYPE "${NEW_DISK}" | awk '$2=="newroot" || $3=="ext4" {print "/dev/"$1; exit}')
+EFI_PART=$(lsblk -nlo NAME,FSTYPE "${NEW_DISK}" | awk '$2=="vfat" {print "/dev/"$1; exit}')
 
 [ -z "$ROOT_PART" ] && { echo "Nu am găsit partiția root!"; exit 1; }
 
