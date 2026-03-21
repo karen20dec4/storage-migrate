@@ -1,3 +1,4 @@
+### modificat de user
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -906,25 +907,47 @@ $form.Controls.Add($statusStrip)
 $Script:AllDisks = @()
 
 function Invoke-RefreshDisks {
-    $Script:AllDisks = @(Get-AllPhysicalDisks)
+    # Colectăm discurile și forțăm rezultatul să fie un Array, chiar dacă e 1 singur obiect
+    # Folosim @(...) pentru a evita eroarea de StrictMode la .Count
+    $rawDisks = @(Get-AllPhysicalDisks)
+    $Script:AllDisks = $rawDisks
+
     $cmbSource.Items.Clear()
     $cmbTarget.Items.Clear()
+
     foreach ($d in $Script:AllDisks) {
-        [void]$cmbSource.Items.Add($d.Display)
-        [void]$cmbTarget.Items.Add($d.Display)
+        if ($null -ne $d -and $null -ne $d.Display) {
+            [void]$cmbSource.Items.Add($d.Display)
+            [void]$cmbTarget.Items.Add($d.Display)
+        }
     }
-    if ($Script:AllDisks.Count -ge 1) { $cmbSource.SelectedIndex = 0 }
-    if ($Script:AllDisks.Count -ge 2) { $cmbTarget.SelectedIndex = 1 }
+
+    # Verificăm numărul de itemi folosind variabila de array forțată
+    $diskCount = $Script:AllDisks.Length 
+    # Notă: .Length funcționează mai bine pe Array-uri în mod Strict decât .Count
+
+    if ($diskCount -ge 1) { 
+        try { $cmbSource.SelectedIndex = 0 } catch {}
+    }
+    
+    if ($diskCount -ge 2) { 
+        try { $cmbTarget.SelectedIndex = 1 } catch {}
+    } elseif ($diskCount -eq 1) {
+        try { $cmbTarget.SelectedIndex = 0 } catch {}
+    }
+
     Invoke-UpdateGrids
 }
 
 function Invoke-UpdateGrids {
-    # Source grid
+    # Grila Sursă
     $dgvSrc.Rows.Clear(); $dgvSrc.Columns.Clear()
-    if ($cmbSource.SelectedIndex -ge 0 -and $cmbSource.SelectedIndex -lt $Script:AllDisks.Count) {
+    # Folosim .Length in loc de .Count pentru siguranta in StrictMode
+    if ($cmbSource.SelectedIndex -ge 0 -and $cmbSource.SelectedIndex -lt $Script:AllDisks.Length) {
         $sd   = $Script:AllDisks[$cmbSource.SelectedIndex]
-        $rows = Get-DiskPartitionTable $sd.Index
-        if ($rows.Count -gt 0) {
+        # Fortam $rows sa fie un array folosind @()
+        $rows = @(Get-DiskPartitionTable $sd.Index)
+        if ($rows.Length -gt 0) {
             foreach ($col in $rows[0].PSObject.Properties.Name) { [void]$dgvSrc.Columns.Add($col, $col) }
             foreach ($r in $rows) {
                 [void]$dgvSrc.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
@@ -932,12 +955,14 @@ function Invoke-UpdateGrids {
         }
         $grpInfo.Text = "Partiții:  Disk $($sd.Index) — $($sd.Model)  (stânga = sursă, dreapta = țintă)"
     }
-    # Target grid
+
+    # Grila Destinație
     $dgvDst.Rows.Clear(); $dgvDst.Columns.Clear()
-    if ($cmbTarget.SelectedIndex -ge 0 -and $cmbTarget.SelectedIndex -lt $Script:AllDisks.Count) {
+    if ($cmbTarget.SelectedIndex -ge 0 -and $cmbTarget.SelectedIndex -lt $Script:AllDisks.Length) {
         $td   = $Script:AllDisks[$cmbTarget.SelectedIndex]
-        $rows = Get-DiskPartitionTable $td.Index
-        if ($rows.Count -gt 0) {
+        # Fortam $rows sa fie un array folosind @()
+        $rows = @(Get-DiskPartitionTable $td.Index)
+        if ($rows.Length -gt 0) {
             foreach ($col in $rows[0].PSObject.Properties.Name) { [void]$dgvDst.Columns.Add($col, $col) }
             foreach ($r in $rows) {
                 [void]$dgvDst.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
