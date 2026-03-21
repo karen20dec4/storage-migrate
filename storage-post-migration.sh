@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# post-migration.sh v2.4 - Final LVM detection fix + syntax cleanup
+# storage-post-migration.sh v2.5 - initramfs tool guard + date comment
+# Date: 2026-03-21
 # - Summary-mode by default (concise console output)
 # - Verbose mode streams command output (useful for debugging)
 # - All detailed output is logged to LOG (default /root/storage-migrate-backups/post-migration.log)
+# - Graceful handling when initramfs/grub tools are absent (e.g. after data-clone)
 #
 # Usage:
-#   ./post-migration.sh                 # summary (concise, incremental step rows)
-#   ./post-migration.sh --verbose       # verbose (stream command output)
-#   ./post-migration.sh --quiet         # very quiet (only fatal errors)
-#   ./post-migration.sh --extend-lvm auto # auto-extend LVM
+#   ./storage-post-migration.sh                 # summary (concise, incremental step rows)
+#   ./storage-post-migration.sh --verbose       # verbose (stream command output)
+#   ./storage-post-migration.sh --quiet         # very quiet (only fatal errors)
+#   ./storage-post-migration.sh --extend-lvm auto # auto-extend LVM
+#
+# NOTE FOR AI: Increment version by +0.1 and update the Date comment each time this file is modified.
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.4"
+SCRIPT_VERSION="2.5"
 ROOT="/"
 MODE="preboot"
 FIX_RESUME="auto"
@@ -71,9 +75,9 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-post-migration.sh v2.4
+storage-post-migration.sh v2.5
 Usage:
-  ./post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
+  ./storage-post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:
   --postboot            run additional checks for a live system (post-boot audit)
   --verbose             stream detailed output to console + log
@@ -481,6 +485,13 @@ extend_lvm_volumes() {
 rebuild_boot_artifacts() {
   step_start "Rebuild initramfs & grub"
   local realroot; realroot="$(readlink -f "${ROOT}")"
+
+  # Guard: skip gracefully if initramfs tools are not present (e.g. after a data-clone)
+  if ! command -v update-initramfs >/dev/null 2>&1 && ! command -v mkinitrd >/dev/null 2>&1; then
+    _log_write "update-initramfs not found — skipping (not a Debian/Ubuntu system or data-clone target)"
+    step_ok; return 0
+  fi
+
   if [ "${realroot}" = "/" ]; then
     local kcur; kcur="$(uname -r)"
     if ! run_cmd /usr/sbin/update-initramfs -u -k "${kcur}" -v; then
