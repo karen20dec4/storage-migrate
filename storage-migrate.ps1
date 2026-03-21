@@ -29,7 +29,7 @@
 
 .NOTES
     Author  : karen20ced4 + Copilot
-    Version : 1.0
+    Version : 1.1
     Date    : 2026-03-21
     Repo    : https://github.com/karen20ced4/NVME-Migrate
     Requires: Windows 10 / Windows 11 / Windows Server 2019+
@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 0 — Version & paths
 # ─────────────────────────────────────────────────────────────────────────────
-$Script:AppVersion = '1.0'
+$Script:AppVersion = '1.1'
 $Script:AppDate    = '2026-03-21'
 # Use ProgramData so the path is consistent when script is run elevated
 # (elevation can change $env:USERPROFILE to the built-in Administrator profile)
@@ -631,33 +631,38 @@ $Script:MigrateWorkerScript = {
 #region ── Main Form ──────────────────────────────────────────────────────────
 $form                  = New-Object System.Windows.Forms.Form
 $form.Text             = "Windows Storage Migration Tool  v$Script:AppVersion"
-$form.Size             = New-Object System.Drawing.Size(1020, 800)
-$form.MinimumSize      = New-Object System.Drawing.Size(920, 730)
+# Taller window so all controls (incl. bottom buttons) are fully visible
+$form.Size             = New-Object System.Drawing.Size(1050, 960)
+$form.MinimumSize      = New-Object System.Drawing.Size(980, 870)
 $form.StartPosition    = 'CenterScreen'
 $form.BackColor        = [System.Drawing.Color]::FromArgb(240, 242, 246)
-$form.Font             = New-Object System.Drawing.Font('Segoe UI', 9)
+# Base font +25%: 9 → 11  (applies to all controls that don't set their own font)
+$form.Font             = New-Object System.Drawing.Font('Segoe UI', 11)
 $form.FormBorderStyle  = 'Sizable'
 #endregion
 
 #region ── Header panel ───────────────────────────────────────────────────────
 $pnlHeader            = New-Object System.Windows.Forms.Panel
 $pnlHeader.Dock       = 'Top'
-$pnlHeader.Height     = 64
+$pnlHeader.Height     = 78  # slightly taller for larger fonts
 $pnlHeader.BackColor  = [System.Drawing.Color]::FromArgb(0, 78, 152)
 
 $lblTitle             = New-Object System.Windows.Forms.Label
-$lblTitle.Text        = "   💾  Windows Storage Migration Tool   —   v$Script:AppVersion"
+# Emoji removed: floppy-disk was here
+$lblTitle.Text        = "   Storage Migration Tool   —   v$Script:AppVersion"
 $lblTitle.ForeColor   = [System.Drawing.Color]::White
-$lblTitle.Font        = New-Object System.Drawing.Font('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
+# Font +25%: 13 → 16
+$lblTitle.Font        = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
 $lblTitle.Dock        = 'Fill'
 $lblTitle.TextAlign   = 'MiddleLeft'
 
 $lblSubTitle          = New-Object System.Windows.Forms.Label
 $lblSubTitle.Text     = "   Migrare OS Windows  |  Clonare disc sector-by-sector   —   $Script:AppDate"
 $lblSubTitle.ForeColor= [System.Drawing.Color]::FromArgb(180, 210, 240)
-$lblSubTitle.Font     = New-Object System.Drawing.Font('Segoe UI', 8)
+# Font +25%: 8 → 10
+$lblSubTitle.Font     = New-Object System.Drawing.Font('Segoe UI', 10)
 $lblSubTitle.Dock     = 'Bottom'
-$lblSubTitle.Height   = 20
+$lblSubTitle.Height   = 22
 $lblSubTitle.TextAlign= 'MiddleLeft'
 
 $pnlHeader.Controls.AddRange(@($lblTitle, $lblSubTitle))
@@ -667,22 +672,27 @@ $form.Controls.Add($pnlHeader)
 #region ── Mode selection ─────────────────────────────────────────────────────
 $grpMode              = New-Object System.Windows.Forms.GroupBox
 $grpMode.Text         = 'Mod Operare'
-$grpMode.Location     = New-Object System.Drawing.Point(10, 72)
-$grpMode.Size         = New-Object System.Drawing.Size(994, 62)
-$grpMode.Font         = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$grpMode.Location     = New-Object System.Drawing.Point(10, 86)
+$grpMode.Size         = New-Object System.Drawing.Size(1024, 80)
+# Font +25%: 9 Bold → 11 Bold
+$grpMode.Font         = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
 
 $rbMigrate            = New-Object System.Windows.Forms.RadioButton
-$rbMigrate.Text       = '📁  Migrare OS  (partition + robocopy + bcdboot — muta Windows pe disc nou)'
-$rbMigrate.Location   = New-Object System.Drawing.Point(16, 22)
-$rbMigrate.Size       = New-Object System.Drawing.Size(490, 26)
-$rbMigrate.Font       = New-Object System.Drawing.Font('Segoe UI', 9)
+# Emoji removed: folder icon was here
+$rbMigrate.Text       = 'Migrare OS  (partition + robocopy + bcdboot — muta Windows pe disc nou)'
+$rbMigrate.Location   = New-Object System.Drawing.Point(16, 26)
+$rbMigrate.Size       = New-Object System.Drawing.Size(494, 34)
+# Font +25%: 9 → 11
+$rbMigrate.Font       = New-Object System.Drawing.Font('Segoe UI', 11)
 $rbMigrate.Checked    = $true
 
 $rbClone              = New-Object System.Windows.Forms.RadioButton
-$rbClone.Text         = '💿  Clonare disc  (sector-by-sector, echivalent dd — orice tip de disc)'
-$rbClone.Location     = New-Object System.Drawing.Point(516, 22)
-$rbClone.Size         = New-Object System.Drawing.Size(470, 26)
-$rbClone.Font         = New-Object System.Drawing.Font('Segoe UI', 9)
+# Emoji removed: disc icon was here
+$rbClone.Text         = 'Clonare disc  (sector-by-sector, echivalent dd — orice tip de disc)'
+$rbClone.Location     = New-Object System.Drawing.Point(516, 26)
+$rbClone.Size         = New-Object System.Drawing.Size(494, 34)
+# Font +25%: 9 → 11
+$rbClone.Font         = New-Object System.Drawing.Font('Segoe UI', 11)
 
 $grpMode.Controls.AddRange(@($rbMigrate, $rbClone))
 $form.Controls.Add($grpMode)
@@ -691,40 +701,44 @@ $form.Controls.Add($grpMode)
 #region ── Disk selection ─────────────────────────────────────────────────────
 $grpDisks             = New-Object System.Windows.Forms.GroupBox
 $grpDisks.Text        = 'Selectare discuri'
-$grpDisks.Location    = New-Object System.Drawing.Point(10, 140)
-$grpDisks.Size        = New-Object System.Drawing.Size(994, 68)
+$grpDisks.Location    = New-Object System.Drawing.Point(10, 174)
+$grpDisks.Size        = New-Object System.Drawing.Size(1024, 84)
 
 # Source
 $lblSrc               = New-Object System.Windows.Forms.Label
-$lblSrc.Text          = 'Disc Sursă:'
-$lblSrc.Location      = New-Object System.Drawing.Point(8, 26)
-$lblSrc.Size          = New-Object System.Drawing.Size(84, 23)
+$lblSrc.Text          = 'Disc Sursa:'
+$lblSrc.Location      = New-Object System.Drawing.Point(8, 28)
+$lblSrc.Size          = New-Object System.Drawing.Size(94, 30)
 $lblSrc.TextAlign     = 'MiddleRight'
 
 $cmbSource            = New-Object System.Windows.Forms.ComboBox
-$cmbSource.Location   = New-Object System.Drawing.Point(96, 23)
-$cmbSource.Size       = New-Object System.Drawing.Size(396, 23)
+$cmbSource.Location   = New-Object System.Drawing.Point(106, 25)
+$cmbSource.Size       = New-Object System.Drawing.Size(380, 30)
 $cmbSource.DropDownStyle = 'DropDownList'
-$cmbSource.Font       = New-Object System.Drawing.Font('Consolas', 8.5)
+# Font +25%: Consolas 8.5 → 10.5
+$cmbSource.Font       = New-Object System.Drawing.Font('Consolas', 10.5)
 
 # Target
 $lblDst               = New-Object System.Windows.Forms.Label
-$lblDst.Text          = 'Disc Țintă:'
-$lblDst.Location      = New-Object System.Drawing.Point(502, 26)
-$lblDst.Size          = New-Object System.Drawing.Size(84, 23)
+$lblDst.Text          = 'Disc Tinta:'
+$lblDst.Location      = New-Object System.Drawing.Point(498, 28)
+$lblDst.Size          = New-Object System.Drawing.Size(88, 30)
 $lblDst.TextAlign     = 'MiddleRight'
 
 $cmbTarget            = New-Object System.Windows.Forms.ComboBox
-$cmbTarget.Location   = New-Object System.Drawing.Point(590, 23)
-$cmbTarget.Size       = New-Object System.Drawing.Size(336, 23)
+$cmbTarget.Location   = New-Object System.Drawing.Point(590, 25)
+$cmbTarget.Size       = New-Object System.Drawing.Size(322, 30)
 $cmbTarget.DropDownStyle = 'DropDownList'
-$cmbTarget.Font       = New-Object System.Drawing.Font('Consolas', 8.5)
+# Font +25%: Consolas 8.5 → 10.5
+$cmbTarget.Font       = New-Object System.Drawing.Font('Consolas', 10.5)
 
+# Refresh button — circle-arrow (U+27F3) replaced with text "Ref." to avoid rendering as []
 $btnRefresh           = New-Object System.Windows.Forms.Button
-$btnRefresh.Text      = '⟳'
-$btnRefresh.Location  = New-Object System.Drawing.Point(932, 21)
-$btnRefresh.Size      = New-Object System.Drawing.Size(52, 27)
-$btnRefresh.Font      = New-Object System.Drawing.Font('Segoe UI', 10)
+$btnRefresh.Text      = 'Ref.'
+$btnRefresh.Location  = New-Object System.Drawing.Point(920, 23)
+$btnRefresh.Size      = New-Object System.Drawing.Size(72, 36)
+# Font +25%: 10 → 12.5
+$btnRefresh.Font      = New-Object System.Drawing.Font('Segoe UI', 12.5)
 $btnRefresh.FlatStyle = 'Flat'
 $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
 $btnRefresh.ForeColor = [System.Drawing.Color]::White
@@ -736,14 +750,14 @@ $form.Controls.Add($grpDisks)
 
 #region ── Partition info grids ───────────────────────────────────────────────
 $grpInfo              = New-Object System.Windows.Forms.GroupBox
-$grpInfo.Text         = 'Partiții disc sursă (stânga)  vs  disc țintă (dreapta)'
-$grpInfo.Location     = New-Object System.Drawing.Point(10, 214)
-$grpInfo.Size         = New-Object System.Drawing.Size(994, 168)
+$grpInfo.Text         = 'Partitii disc sursa (stanga)  vs  disc tinta (dreapta)'
+$grpInfo.Location     = New-Object System.Drawing.Point(10, 266)
+$grpInfo.Size         = New-Object System.Drawing.Size(1024, 196)
 
 function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
     $g                             = New-Object System.Windows.Forms.DataGridView
-    $g.Location                    = New-Object System.Drawing.Point($x, 18)
-    $g.Size                        = New-Object System.Drawing.Size(490, 143)
+    $g.Location                    = New-Object System.Drawing.Point($x, 20)
+    $g.Size                        = New-Object System.Drawing.Size(505, 168)
     $g.ReadOnly                    = $true
     $g.AllowUserToAddRows          = $false
     $g.AllowUserToDeleteRows       = $false
@@ -752,12 +766,15 @@ function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
     $g.AutoSizeColumnsMode         = 'Fill'
     $g.BackgroundColor             = [System.Drawing.Color]::White
     $g.BorderStyle                 = 'None'
-    $g.Font                        = New-Object System.Drawing.Font('Consolas', 8)
+    # Log-area font kept at Consolas 8.5 per user request; grid cells are NOT part of the log
+    # but they were separately at Consolas 8 — increase by 25%: 8 → 10
+    $g.Font                        = New-Object System.Drawing.Font('Consolas', 10)
     $g.GridColor                   = [System.Drawing.Color]::FromArgb(220, 222, 228)
     $g.SelectionMode               = 'FullRowSelect'
     $g.ColumnHeadersDefaultCellStyle.BackColor = $headerColor
     $g.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $g.ColumnHeadersDefaultCellStyle.Font      = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold)
+    # Font +25%: 8.5 Bold → 10.5 Bold
+    $g.ColumnHeadersDefaultCellStyle.Font      = New-Object System.Drawing.Font('Segoe UI', 10.5, [System.Drawing.FontStyle]::Bold)
     $g.ColumnHeadersBorderStyle                = 'None'
     $g.DefaultCellStyle.SelectionBackColor     = [System.Drawing.Color]::FromArgb(205, 225, 250)
     $g.DefaultCellStyle.SelectionForeColor     = [System.Drawing.Color]::Black
@@ -766,7 +783,7 @@ function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
 }
 
 $dgvSrc = New-InfoGrid 2   ([System.Drawing.Color]::FromArgb(0, 112, 184))
-$dgvDst = New-InfoGrid 499 ([System.Drawing.Color]::FromArgb(40, 140, 60))
+$dgvDst = New-InfoGrid 513 ([System.Drawing.Color]::FromArgb(40, 140, 60))
 
 $grpInfo.Controls.AddRange(@($dgvSrc, $dgvDst))
 $form.Controls.Add($grpInfo)
@@ -775,55 +792,59 @@ $form.Controls.Add($grpInfo)
 #region ── Progress ───────────────────────────────────────────────────────────
 $grpProgress          = New-Object System.Windows.Forms.GroupBox
 $grpProgress.Text     = 'Progres transfer'
-$grpProgress.Location = New-Object System.Drawing.Point(10, 388)
-$grpProgress.Size     = New-Object System.Drawing.Size(994, 120)
+$grpProgress.Location = New-Object System.Drawing.Point(10, 470)
+$grpProgress.Size     = New-Object System.Drawing.Size(1024, 148)
 
 $progressBar          = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(8, 22)
-$progressBar.Size     = New-Object System.Drawing.Size(976, 28)
+$progressBar.Location = New-Object System.Drawing.Point(8, 26)
+$progressBar.Size     = New-Object System.Drawing.Size(1004, 32)
 $progressBar.Minimum  = 0
 $progressBar.Maximum  = 100
 $progressBar.Style    = 'Continuous'
 
-# Stat labels row
+# Stat labels row — Y increased to accommodate taller progress bar
+# Font +25%: 9 Bold → 11 Bold for lblPct; others inherit form font (11)
 $lblPct               = New-Object System.Windows.Forms.Label
 $lblPct.Text          = '0%'
-$lblPct.Location      = New-Object System.Drawing.Point(8, 58)
-$lblPct.Size          = New-Object System.Drawing.Size(56, 20)
-$lblPct.Font          = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$lblPct.Location      = New-Object System.Drawing.Point(8, 70)
+$lblPct.Size          = New-Object System.Drawing.Size(64, 28)
+$lblPct.Font          = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
 $lblPct.ForeColor     = [System.Drawing.Color]::FromArgb(0, 78, 152)
 
 $lblSpeed             = New-Object System.Windows.Forms.Label
-$lblSpeed.Text        = 'Viteză: —'
-$lblSpeed.Location    = New-Object System.Drawing.Point(72, 58)
-$lblSpeed.Size        = New-Object System.Drawing.Size(150, 20)
+$lblSpeed.Text        = 'Viteza: —'
+$lblSpeed.Location    = New-Object System.Drawing.Point(80, 70)
+$lblSpeed.Size        = New-Object System.Drawing.Size(180, 28)
 $lblSpeed.ForeColor   = [System.Drawing.Color]::DimGray
 
 $lblDone              = New-Object System.Windows.Forms.Label
 $lblDone.Text         = 'Copiat: —'
-$lblDone.Location     = New-Object System.Drawing.Point(230, 58)
-$lblDone.Size         = New-Object System.Drawing.Size(200, 20)
+$lblDone.Location     = New-Object System.Drawing.Point(268, 70)
+$lblDone.Size         = New-Object System.Drawing.Size(220, 28)
 $lblDone.ForeColor    = [System.Drawing.Color]::DimGray
 
 $lblElapsed           = New-Object System.Windows.Forms.Label
-$lblElapsed.Text      = '⏱  Timp scurs:   --:--:--'
-$lblElapsed.Location  = New-Object System.Drawing.Point(440, 58)
-$lblElapsed.Size      = New-Object System.Drawing.Size(210, 20)
+# Stopwatch icon (U+23F1) removed — shows as [] without emoji font
+$lblElapsed.Text      = 'Timp scurs:   --:--:--'
+$lblElapsed.Location  = New-Object System.Drawing.Point(496, 70)
+$lblElapsed.Size      = New-Object System.Drawing.Size(232, 28)
 $lblElapsed.ForeColor = [System.Drawing.Color]::DimGray
 
 $lblEta               = New-Object System.Windows.Forms.Label
-$lblEta.Text          = '⏳  Timp rămas:   --:--:--'
-$lblEta.Location      = New-Object System.Drawing.Point(660, 58)
-$lblEta.Size          = New-Object System.Drawing.Size(210, 20)
+# Hourglass icon (U+23F3) removed — shows as [] without emoji font
+$lblEta.Text          = 'Timp ramas:   --:--:--'
+$lblEta.Location      = New-Object System.Drawing.Point(736, 70)
+$lblEta.Size          = New-Object System.Drawing.Size(232, 28)
 $lblEta.ForeColor     = [System.Drawing.Color]::DimGray
 
 # Step name / status label
 $lblStep              = New-Object System.Windows.Forms.Label
-$lblStep.Text         = 'Pregătit. Selectează mod, sursă și destinație, apoi apasă  ▶ Pornire.'
-$lblStep.Location     = New-Object System.Drawing.Point(8, 84)
-$lblStep.Size         = New-Object System.Drawing.Size(976, 24)
+$lblStep.Text         = 'Pregatit. Selecteaza mod, sursa si destinatie, apoi apasa  Pornire.'
+$lblStep.Location     = New-Object System.Drawing.Point(8, 108)
+$lblStep.Size         = New-Object System.Drawing.Size(1004, 30)
 $lblStep.ForeColor    = [System.Drawing.Color]::FromArgb(40, 80, 160)
-$lblStep.Font         = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Italic)
+# Font +25%: 8.5 Italic → 10.5 Italic
+$lblStep.Font         = New-Object System.Drawing.Font('Segoe UI', 10.5, [System.Drawing.FontStyle]::Italic)
 
 $grpProgress.Controls.AddRange(@($progressBar, $lblPct, $lblSpeed, $lblDone, $lblElapsed, $lblEta, $lblStep))
 $form.Controls.Add($grpProgress)
@@ -831,17 +852,18 @@ $form.Controls.Add($grpProgress)
 
 #region ── Log area ───────────────────────────────────────────────────────────
 $grpLog               = New-Object System.Windows.Forms.GroupBox
-$grpLog.Text          = 'Log operațiune'
-$grpLog.Location      = New-Object System.Drawing.Point(10, 514)
-$grpLog.Size          = New-Object System.Drawing.Size(994, 210)
+$grpLog.Text          = 'Log operatiune'
+$grpLog.Location      = New-Object System.Drawing.Point(10, 626)
+$grpLog.Size          = New-Object System.Drawing.Size(1024, 240)
 $grpLog.Anchor        = 'Top,Left,Right,Bottom'
 
 $rtbLog               = New-Object System.Windows.Forms.RichTextBox
-$rtbLog.Location      = New-Object System.Drawing.Point(5, 18)
-$rtbLog.Size          = New-Object System.Drawing.Size(982, 185)
+$rtbLog.Location      = New-Object System.Drawing.Point(5, 20)
+$rtbLog.Size          = New-Object System.Drawing.Size(1012, 212)
 $rtbLog.ReadOnly      = $true
 $rtbLog.BackColor     = [System.Drawing.Color]::FromArgb(15, 15, 25)
 $rtbLog.ForeColor     = [System.Drawing.Color]::FromArgb(200, 200, 210)
+# Log font kept UNCHANGED per user request (Consolas 8.5)
 $rtbLog.Font          = New-Object System.Drawing.Font('Consolas', 8.5)
 $rtbLog.ScrollBars    = 'Vertical'
 $rtbLog.WordWrap      = $false
@@ -853,32 +875,39 @@ $form.Controls.Add($grpLog)
 
 #region ── Button panel ───────────────────────────────────────────────────────
 $pnlButtons           = New-Object System.Windows.Forms.Panel
-$pnlButtons.Location  = New-Object System.Drawing.Point(10, 730)
-$pnlButtons.Size      = New-Object System.Drawing.Size(994, 48)
+# Positioned so buttons are fully visible (form ~928px client area minus status strip ~24px = 904px)
+$pnlButtons.Location  = New-Object System.Drawing.Point(10, 874)
+$pnlButtons.Size      = New-Object System.Drawing.Size(1024, 56)
 $pnlButtons.Anchor    = 'Bottom,Left,Right'
 
 $chkDryRun            = New-Object System.Windows.Forms.CheckBox
-$chkDryRun.Text       = '🔍  Dry-Run  (simulare — nu se fac modificari pe disc)'
-$chkDryRun.Location   = New-Object System.Drawing.Point(0, 14)
+# Emoji removed: magnifying-glass was here
+$chkDryRun.Text       = 'Dry-Run  (simulare — nu se fac modificari pe disc)'
+$chkDryRun.Location   = New-Object System.Drawing.Point(0, 15)
 $chkDryRun.AutoSize   = $true
-$chkDryRun.Font       = New-Object System.Drawing.Font('Segoe UI', 9)
+# Font +25%: 9 → 11
+$chkDryRun.Font       = New-Object System.Drawing.Font('Segoe UI', 11)
 
+# ▶ (U+25B6) is in standard Segoe UI — safe to keep
 $btnStart             = New-Object System.Windows.Forms.Button
 $btnStart.Text        = '▶  Pornire'
-$btnStart.Location    = New-Object System.Drawing.Point(704, 7)
-$btnStart.Size        = New-Object System.Drawing.Size(136, 36)
-$btnStart.Font        = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$btnStart.Location    = New-Object System.Drawing.Point(754, 8)
+$btnStart.Size        = New-Object System.Drawing.Size(152, 42)
+# Font +25%: 10 Bold → 12.5 Bold
+$btnStart.Font        = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
 $btnStart.BackColor   = [System.Drawing.Color]::FromArgb(0, 120, 212)
 $btnStart.ForeColor   = [System.Drawing.Color]::White
 $btnStart.FlatStyle   = 'Flat'
 $btnStart.FlatAppearance.BorderSize = 0
 $btnStart.Cursor      = [System.Windows.Forms.Cursors]::Hand
 
+# ✕ (U+2715) is in standard Segoe UI — safe to keep
 $btnCancel            = New-Object System.Windows.Forms.Button
 $btnCancel.Text       = '✕  Anulare'
-$btnCancel.Location   = New-Object System.Drawing.Point(848, 7)
-$btnCancel.Size       = New-Object System.Drawing.Size(136, 36)
-$btnCancel.Font       = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$btnCancel.Location   = New-Object System.Drawing.Point(916, 8)
+$btnCancel.Size       = New-Object System.Drawing.Size(152, 42)
+# Font +25%: 10 Bold → 12.5 Bold
+$btnCancel.Font       = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
 $btnCancel.BackColor  = [System.Drawing.Color]::FromArgb(196, 43, 28)
 $btnCancel.ForeColor  = [System.Drawing.Color]::White
 $btnCancel.FlatStyle  = 'Flat'
@@ -894,7 +923,7 @@ $form.Controls.Add($pnlButtons)
 $statusStrip          = New-Object System.Windows.Forms.StatusStrip
 $statusStrip.BackColor= [System.Drawing.Color]::FromArgb(220, 225, 235)
 $statusLabel          = New-Object System.Windows.Forms.ToolStripStatusLabel
-$statusLabel.Text     = "Pregătit   |   Administrator: $env:USERNAME   |   Log: $Script:LogFile"
+$statusLabel.Text     = "Pregatit   |   Administrator: $env:USERNAME   |   Log: $Script:LogFile"
 $statusLabel.Spring   = $true
 $statusLabel.TextAlign= 'MiddleLeft'
 $null = $statusStrip.Items.Add($statusLabel)
@@ -953,7 +982,7 @@ function Invoke-UpdateGrids {
                 [void]$dgvSrc.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
             }
         }
-        $grpInfo.Text = "Partiții:  Disk $($sd.Index) — $($sd.Model)  (stânga = sursă, dreapta = țintă)"
+        $grpInfo.Text = "Partitii:  Disk $($sd.Index) — $($sd.Model)  (stanga = sursa, dreapta = tinta)"
     }
 
     # Grila Destinație
@@ -987,10 +1016,10 @@ function Write-GuiLog ([string]$line) {
 function Reset-ProgressUI {
     $progressBar.Value  = 0
     $lblPct.Text        = '0%'
-    $lblSpeed.Text      = 'Viteză: —'
+    $lblSpeed.Text      = 'Viteza: —'
     $lblDone.Text       = 'Copiat: —'
-    $lblElapsed.Text    = '⏱  Timp scurs:   --:--:--'
-    $lblEta.Text        = '⏳  Timp rămas:   --:--:--'
+    $lblElapsed.Text    = 'Timp scurs:   --:--:--'
+    $lblEta.Text        = 'Timp ramas:   --:--:--'
     $lblStep.Text       = 'Pornire...'
     $progressBar.ForeColor = [System.Drawing.SystemColors]::Highlight
 }
@@ -1037,20 +1066,20 @@ $guiTimer.Add_Tick({
         }
 
         # Elapsed
-        $lblElapsed.Text = '⏱  Timp scurs:   ' + (Format-Hms $elapsed)
+        $lblElapsed.Text = 'Timp scurs:   ' + (Format-Hms $elapsed)
 
         # Speed + ETA
         if ($speedBps -gt 0) {
             $speedMB = [math]::Round($speedBps / 1MB, 1)
-            $lblSpeed.Text = "Viteză: $speedMB MB/s"
+            $lblSpeed.Text = "Viteza: $speedMB MB/s"
             if ($totalBytes -gt 0 -and $bytesDone -gt 0 -and $bytesDone -lt $totalBytes) {
                 $remaining   = $totalBytes - $bytesDone
                 $etaSec      = [long]($remaining / $speedBps)
-                $lblEta.Text = '⏳  Timp rămas:   ' + (Format-Hms $etaSec)
+                $lblEta.Text = 'Timp ramas:   ' + (Format-Hms $etaSec)
             }
         } elseif ($sync.Phase -eq 'migrate') {
             # Migrate mode: no byte-level speed for robocopy — show elapsed only
-            $lblSpeed.Text = 'Viteză: (robocopy)'
+            $lblSpeed.Text = 'Viteza: (robocopy)'
         }
     }
 
@@ -1068,21 +1097,21 @@ $guiTimer.Add_Tick({
             $progressBar.Value     = 100
             $progressBar.ForeColor = [System.Drawing.Color]::FromArgb(0, 180, 0)
             $lblPct.Text           = '100%'
-            $lblStep.Text          = '✔  Operațiune finalizată cu succes!'
+            $lblStep.Text          = 'OK  Operatiune finalizata cu succes!'
             $lblStep.ForeColor     = [System.Drawing.Color]::FromArgb(0, 140, 0)
-            $statusLabel.Text      = '✔  Gata cu succes!'
+            $statusLabel.Text      = 'OK  Gata cu succes!'
             [System.Windows.Forms.MessageBox]::Show(
-                "Operațiunea a fost finalizată cu succes!`n`nVerifică log-ul pentru detalii:`n$Script:LogFile",
-                '✔  Succes',
+                "Operatiunea a fost finalizata cu succes!`n`nVerifica log-ul pentru detalii:`n$Script:LogFile",
+                'Succes',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         } else {
-            $lblStep.Text      = "✖  Eroare: $($sync.LastError)"
+            $lblStep.Text      = "EROARE: $($sync.LastError)"
             $lblStep.ForeColor = [System.Drawing.Color]::FromArgb(180, 0, 0)
-            $statusLabel.Text  = '✖  Eroare!'
+            $statusLabel.Text  = 'EROARE!'
             [System.Windows.Forms.MessageBox]::Show(
-                "Operațiunea a eșuat.`n`nEroare:`n$($sync.LastError)`n`nVerifică log-ul:`n$Script:LogFile",
-                '✖  Eroare',
+                "Operatiunea a esuat.`n`nEroare:`n$($sync.LastError)`n`nVerifica log-ul:`n$Script:LogFile",
+                'Eroare',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
         }
@@ -1159,7 +1188,7 @@ $btnStart.Add_Click({
 
     $modeStr = if ($isClone) { 'CLONARE DISC  (sector-by-sector)' } else { 'MIGRARE OS  (robocopy + bcdboot)' }
     $warnStr = if ($isDryRun) { "[DRY-RUN]  Nicio modificare reala pe disc.`n`n" } else {
-        "⚠  ATENTIE: TOATE DATELE DE PE DISCUL DESTINATIE VOR FI STERSE!`n`n"
+        "ATENTIE: TOATE DATELE DE PE DISCUL DESTINATIE VOR FI STERSE!`n`n"
     }
     $confirmMsg = @"
 $warnStr
