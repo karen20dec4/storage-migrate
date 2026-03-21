@@ -75,7 +75,7 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-storage-post-migration.sh v2.5
+storage-post-migration.sh v2.6
 Usage:
   ./storage-post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:

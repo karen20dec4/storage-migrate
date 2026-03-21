@@ -1,20 +1,127 @@
 # Storage Migration Scripts
 
-Scripts Bash pentru migrarea discurilor de stocare pe sisteme Linux (Debian/Ubuntu).  
+Scripts de migrare disc pentru **Linux** (Bash) și **Windows** (PowerShell GUI).  
 Suportă: SSD, NVMe, HDD, USB, LVM, NTFS, exFAT, ext4, UEFI și BIOS.
 
 ---
 
 ## Fișiere
 
-| Fișier | Versiune | Descriere |
-|---|---|---|
-| `storage-migrate.sh` | 3.0 | Script principal de migrare / clonare disc |
-| `storage-post-migration.sh` | 2.5 | Script de post-migrare: repară initramfs, GRUB, fstab, LVM |
+| Fișier | Versiune | Platformă | Descriere |
+|---|---|---|---|
+| `storage-migrate.sh` | 3.1 | Linux | Script Bash — migrare OS + clonare disc cu progres hh:mm:ss |
+| `storage-post-migration.sh` | 2.6 | Linux | Script Bash post-migrare: initramfs, GRUB, fstab, LVM |
+| `storage-migrate.ps1` | 1.0 | Windows | Script PowerShell cu **interfață grafică** — migrare OS + clonare disc |
 
 ---
 
-## Scenarii suportate
+## ⭐ Windows — PowerShell GUI (`storage-migrate.ps1`)
+
+Script PowerShell cu interfață grafică (Windows Forms) pentru Windows 10/11.
+
+### Caracteristici
+
+- 🖱️ **Interfață grafică** cu butoane — fără linie de comandă
+- 📁 **Mod Migrare OS** — mută Windows pe un disc nou (partition + robocopy + bcdboot)
+- 💿 **Mod Clonare disc** — copiere sector-cu-sector (echivalent `dd` pe Linux)
+- 📊 **Progress bar** în timp real (0–100%)
+- ⚡ **Viteză transfer** afișată în MB/s
+- ⏱️ **Timp scurs** în format `hh:mm:ss`
+- ⏳ **Timp rămas estimat** în format `hh:mm:ss`
+- 🔍 **Mod Dry-Run** — simulare fără modificări pe disc
+- 📋 **Log colorat** în interfață + fișier persistent
+- 🔒 **Auto-elevare** la Administrator (prompt automat)
+
+### Cerințe Windows
+
+- Windows 10 / Windows 11 / Windows Server 2019+
+- PowerShell 5.1+ (inclus în Windows 10/11)
+- Drepturi de **Administrator** (scriptul cere automat)
+
+### Utilizare
+
+```powershell
+# Metoda 1: Click dreapta pe fișier → "Run with PowerShell"
+
+# Metoda 2: Din PowerShell (ca Administrator)
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\storage-migrate.ps1
+```
+
+### Mod Migrare OS (Windows)
+
+1. Selectează **📁 Migrare OS** (radio button stânga)
+2. Alege discul **sursă** (cel cu Windows curent)
+3. Alege discul **destinație** (disc nou)
+4. Apasă **▶ Pornire**
+5. Confirmă avertismentul de ștergere
+6. Urmărești progresul, viteza (MB/s), timpii (scurs / rămas)
+
+**Ce face intern:**
+- Detectează partițiile (EFI/MSR/OS/Recovery)
+- Creează același layout pe discul destinație (diskpart)
+- Copiază toate fișierele cu `robocopy /B /COPYALL` (backup mode)
+- Instalează bootloader-ul Windows cu `bcdboot`
+
+**Pași după migrare:**
+1. Oprește calculatorul
+2. Înlocuiește fizic discul (scoate sursa, pune destinația)
+3. Pornește calculatorul — Windows bootează de pe discul nou
+
+### Mod Clonare disc (Windows)
+
+1. Selectează **💿 Clonare disc** (radio button dreapta)
+2. Alege discul **sursă** (HDD/SSD cu date)
+3. Alege discul **destinație** (cel puțin egal ca mărime)
+4. Apasă **▶ Pornire**
+5. Urmărești progress bar-ul cu MB/s și ETA hh:mm:ss
+
+**Ce face intern:**
+- Citește discul sursă sector-cu-sector (`\\.\PhysicalDriveN`)
+- Scrie pe discul destinație sector-cu-sector (identic cu `dd bs=4M`)
+- Actualizează progress bar din 500ms în 500ms
+- Afișează viteza medie și ETA recalculate din 2 în 2 secunde
+
+### Interfața grafică
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 💾  Windows Storage Migration Tool  —  v1.0              │
+├──────────────────────────────────────────────────────────┤
+│  ● 📁 Migrare OS    ○ 💿 Clonare disc                   │
+├──────────────────────────────────────────────────────────┤
+│ Disc Sursă: [Disk 0 — 500 GB — Samsung SSD 860]    [⟳]  │
+│ Disc Țintă: [Disk 1 — 2.0 TB — Seagate HDD]              │
+├──── Partiții sursă ──────┬──── Partiții destinație ──────┤
+│ # │ Tip   │ Marime │ ... │ # │ Tip   │ Marime │ ...       │
+├──────────────────────────────────────────────────────────┤
+│ ████████████████░░░░░░░░  64%                            │
+│ Viteză: 112 MB/s  │ Copiat: 320 GB / 500 GB              │
+│ ⏱ Timp scurs: 00:47:32  │  ⏳ Timp rămas: 00:26:44      │
+├──────────────────────────────────────────────────────────┤
+│ [00:12:05] [OK] Clonare sector-by-sector...               │
+│ [00:13:10] [INFO] Viteză medie: 115 MB/s                  │
+├──────────────────────────────────────────────────────────┤
+│ [🔍 Dry-Run]              [▶ Pornire]  [✕ Anulare]       │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Log fișier
+
+Log-ul se salvează automat în:
+```
+C:\ProgramData\storage-migrate-backups\migrate-YYYYMMDD-HHmmss.log
+```
+
+---
+
+---
+
+## Linux — Bash scripts
+
+---
+
+## Scenarii suportate (Linux)
 
 ### 1. Migrare disc root (SSD/NVMe intern → SSD/NVMe intern)
 Copierea sistemului de operare Linux de pe un disc vechi pe unul nou.  
