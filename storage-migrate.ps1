@@ -342,22 +342,38 @@ $Script:MigrateWorkerScript = {
         $psi.CreateNoWindow         = $true
         $p = [System.Diagnostics.Process]::Start($psi)
         $p.StandardInput.Close()              # close stdin immediately so no tool waits for input
-        # Read stdout and stderr concurrently to prevent pipe-buffer deadlock
-        $outTask = $p.StandardOutput.ReadToEndAsync()
-        $errTask = $p.StandardError.ReadToEndAsync()
+        # Stream stdout and stderr line-by-line so the GUI log updates in real time.
+        # ReadToEndAsync() would buffer all output until process exit (bad for long-running
+        # processes like robocopy that can run for hours with no GUI feedback).
+        $outDone = $false
+        $errDone = $false
+        $outTask = $p.StandardOutput.ReadLineAsync()
+        $errTask = $p.StandardError.ReadLineAsync()
+        while (-not $outDone -or -not $errDone) {
+            $progressed = $false
+            if (-not $outDone -and $outTask.IsCompleted) {
+                $l = $outTask.Result
+                if ($null -ne $l) {
+                    $t = $l.TrimEnd()
+                    # Escape { and } so CheckActionPreference's String.Format cannot misinterpret
+                    # Activity IDs or other braced tokens from external tools as format specifiers.
+                    if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') }
+                    $outTask = $p.StandardOutput.ReadLineAsync()
+                } else { $outDone = $true }
+                $progressed = $true
+            }
+            if (-not $errDone -and $errTask.IsCompleted) {
+                $l = $errTask.Result
+                if ($null -ne $l) {
+                    $t = $l.TrimEnd()
+                    if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') 'WARN' }
+                    $errTask = $p.StandardError.ReadLineAsync()
+                } else { $errDone = $true }
+                $progressed = $true
+            }
+            if (-not $progressed) { [System.Threading.Thread]::Sleep(100) }
+        }
         $p.WaitForExit()
-        $out = $outTask.Result
-        $err = $errTask.Result
-        # Escape { and } so CheckActionPreference's internal String.Format cannot misinterpret
-        # Activity IDs or other braced tokens from external tools as format specifiers.
-        foreach ($l in ($out -split "`n")) {
-            $t = $l.Trim()
-            if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') }
-        }
-        foreach ($l in ($err -split "`n")) {
-            $t = $l.Trim()
-            if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') 'WARN' }
-        }
         if (-not $AllowNonZero -and $p.ExitCode -ne 0) {
             throw "Comanda a esuat cu cod $($p.ExitCode): $cmdStr"
         }
@@ -440,13 +456,33 @@ $Script:MigrateWorkerScript = {
         WStep 'Creare tabel partitii pe discul destinatie (DESTRUCTIV)'
 
         if (-not $isDryRun) {
+            # Log current state of destination disk before wiping
+            WLog "Partitii existente pe Disk $dstDiskNumber INAINTE de stergere:"
+            $existingParts = @(Get-Partition -DiskNumber $dstDiskNumber -ErrorAction SilentlyContinue)
+            if ($existingParts.Count -gt 0) {
+                foreach ($ep in $existingParts) {
+                    WLog ("  Partitie #{0}: Tip={1}, Marime={2}" -f $ep.PartitionNumber, $ep.Type, (FmtHR $ep.Size))
+                }
+            } else {
+                WLog "  (nicio partitie detectata pe discul destinatie)"
+            }
+
             WLog 'Sterg disc destinatie (Clear-Disk)...'
             try {
                 Clear-Disk -Number $dstDiskNumber -RemoveData -RemoveOEM -Confirm:$false -ErrorAction Stop
+                WLog "Clear-Disk OK."
             } catch {
                 # Escape { and } so the exception text (e.g. "Activity ID: {guid}") cannot
                 # trigger a FormatException when PowerShell's error handling processes it.
                 WLog ("Clear-Disk avertisment: " + ([string]$_ -replace '\{', '{{' -replace '\}', '}}')) 'WARN'
+            }
+
+            # Log partition state after Clear-Disk
+            $remainParts = @(Get-Partition -DiskNumber $dstDiskNumber -ErrorAction SilentlyContinue)
+            if ($remainParts.Count -gt 0) {
+                WLog ("  Au ramas {0} partitii dupa Clear-Disk (vor fi sterse de diskpart clean)." -f $remainParts.Count) 'WARN'
+            } else {
+                WLog "  Discul destinatie este acum curat (fara partitii)." 'OK'
             }
         }
 
@@ -476,11 +512,23 @@ $Script:MigrateWorkerScript = {
         } else {
             $dpFile = Join-Path $env:TEMP ('storemig-dp-{0}.txt' -f (Get-Date -Format 'HHmmss'))
             $dpScript | Out-File -FilePath $dpFile -Encoding ASCII
-            WLog "Diskpart script: $dpFile"
+            WLog "Script diskpart (fisier: $dpFile):"
+            foreach ($dpLine in $dpLines) { WLog "  $dpLine" }
+            WLog "Rulez diskpart..."
             Invoke-Proc 'diskpart.exe' @('/s', $dpFile) | Out-Null
             Remove-Item $dpFile -Force -ErrorAction SilentlyContinue
+            WLog "Diskpart finalizat. Astept recunoasterea noilor partitii..."
             Start-Sleep -Seconds 3
             Update-Disk -Number $dstDiskNumber -ErrorAction SilentlyContinue
+            $newParts = @(Get-Partition -DiskNumber $dstDiskNumber -ErrorAction SilentlyContinue)
+            if ($newParts.Count -gt 0) {
+                WLog ("Partitii noi create pe Disk {0}:" -f $dstDiskNumber) 'OK'
+                foreach ($np in $newParts) {
+                    WLog ("  Partitie #{0}: Tip={1}, Marime={2}" -f $np.PartitionNumber, $np.Type, (FmtHR $np.Size)) 'OK'
+                }
+            } else {
+                WLog "Atentie: nu am detectat partitii pe discul destinatie dupa diskpart!" 'WARN'
+            }
         }
 
         # Progress: step 2 of 5
@@ -494,23 +542,38 @@ $Script:MigrateWorkerScript = {
             $dstEfi   = $dstParts | Where-Object { $_.Type -eq 'System'  } | Select-Object -First 1
             $dstOs    = $dstParts | Where-Object { $_.Type -eq 'Basic'   } | Select-Object -First 1
 
+            WLog ("Partitii detectate pe discul destinatie: {0}" -f $dstParts.Count)
+            foreach ($dp in $dstParts) {
+                WLog ("  Partitie #{0}: Tip={1}, Marime={2}" -f $dp.PartitionNumber, $dp.Type, (FmtHR $dp.Size))
+            }
+
             if ($isUEFI -and $dstEfi) {
                 $tmpEfiLetter = Get-FreeLetter
                 if ($tmpEfiLetter) {
+                    WLog "Atribui litera $tmpEfiLetter`: partitiei EFI (#$($dstEfi.PartitionNumber))..."
                     Add-PartitionAccessPath -DiskNumber $dstDiskNumber `
                         -PartitionNumber $dstEfi.PartitionNumber `
                         -AccessPath "$tmpEfiLetter`:" -ErrorAction SilentlyContinue
-                    WLog "EFI destinatie → $tmpEfiLetter`:"
+                    WLog "EFI destinatie → $tmpEfiLetter`:" 'OK'
+                } else {
+                    WLog "Nu am gasit o litera libera pentru partitia EFI!" 'WARN'
                 }
+            } elseif ($isUEFI -and -not $dstEfi) {
+                WLog "Atentie: nu am gasit partitia EFI (System) pe discul destinatie!" 'WARN'
             }
             if ($dstOs) {
                 $tmpOsLetter = Get-FreeLetter
                 if ($tmpOsLetter) {
+                    WLog "Atribui litera $tmpOsLetter`: partitiei OS (#$($dstOs.PartitionNumber))..."
                     Add-PartitionAccessPath -DiskNumber $dstDiskNumber `
                         -PartitionNumber $dstOs.PartitionNumber `
                         -AccessPath "$tmpOsLetter`:" -ErrorAction SilentlyContinue
-                    WLog "OS destinatie → $tmpOsLetter`:"
+                    WLog "OS destinatie → $tmpOsLetter`:" 'OK'
+                } else {
+                    WLog "Nu am gasit o litera libera pentru partitia OS destinatie!" 'WARN'
                 }
+            } else {
+                WLog "Atentie: nu am gasit partitia OS (Basic) pe discul destinatie!" 'WARN'
             }
         } else {
             $tmpOsLetter  = 'Z'
@@ -547,6 +610,7 @@ $Script:MigrateWorkerScript = {
         WStep "Copiere fisiere OS: $srcOsLetter`: → $tmpOsLetter`: (robocopy)"
 
         $roboLog  = Join-Path $env:TEMP ('robocopy-{0}.log' -f (Get-Date -Format 'HHmmss'))
+        WLog "Log robocopy: $roboLog"
 
         # Robocopy /XD does not support wildcard paths like C:\Users\*\AppData\Local\Temp.
         # Enumerate actual per-user Temp directories at runtime and add each one individually.
@@ -573,9 +637,9 @@ $Script:MigrateWorkerScript = {
                 "$srcOsLetter`:\hiberfil.sys",
                 "$srcOsLetter`:\DumpStack.log",
                 "$srcOsLetter`:\DumpStack.log.tmp",
-            '/NFL',             # no file names in log (faster)
-            '/NDL',             # no directory names in log
-            '/NP',              # no progress % (cleaner output)
+            # /TEE: output goes to both stdout (captured live by Invoke-Proc) and the log file.
+            # /NFL /NDL /NP removed so file names, directory names and per-file progress are visible.
+            '/TEE',
             "/LOG+:$roboLog"
         )
 
