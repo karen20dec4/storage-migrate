@@ -119,8 +119,10 @@ $Script:WorkerRS     = $null
 # ─────────────────────────────────────────────────────────────────────────────
 function Format-Hms ([long]$totalSeconds) {
     if ($totalSeconds -lt 0) { return '--:--:--' }
-    $h = [math]::Floor($totalSeconds / 3600)
-    $m = [math]::Floor(($totalSeconds % 3600) / 60)
+    # Cast to [long] before using {D2} format specifier: D requires an integer type.
+    # [math]::Floor() returns [double], which makes {0:D2} throw FormatException.
+    $h = [long]($totalSeconds / 3600)
+    $m = [long](($totalSeconds % 3600) / 60)
     $s = $totalSeconds % 60
     return ('{0:D2}:{1:D2}:{2:D2}' -f $h, $m, $s)
 }
