@@ -135,11 +135,6 @@ System.Drawing
     Win32 Version: 4.8.9037.0 built by: NET481REL1
     CodeBase: file:///C:/Windows/Microsoft.Net/assembly/GAC_MSIL/System.Drawing/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Drawing.dll
 ----------------------------------------
-System.Dynamic
-    Assembly Version: 4.0.0.0
-    Win32 Version: 4.8.9037.0
-    CodeBase: file:///C:/Windows/Microsoft.Net/assembly/GAC_MSIL/System.Dynamic/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Dynamic.dll
-----------------------------------------
 Accessibility
     Assembly Version: 4.0.0.0
     Win32 Version: 4.8.9037.0 built by: NET481REL1
