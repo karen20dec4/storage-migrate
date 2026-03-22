@@ -77,7 +77,15 @@ if (-not (Test-IsAdmin)) {
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Warning)
     if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Start-Process -FilePath 'powershell.exe' `
+        # Use Sysnative virtual folder so that a 32-bit PowerShell process re-launches
+        # as 64-bit. Sysnative only exists for 32-bit callers; fall back to System32
+        # for 64-bit callers (where System32 already is the real 64-bit directory).
+        $psDir = if (Test-Path "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe") {
+            "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0"
+        } else {
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+        }
+        Start-Process -FilePath "$psDir\powershell.exe" `
             -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
             -Verb RunAs
     }
@@ -592,7 +600,18 @@ $Script:MigrateWorkerScript = {
         } else {
             $bcdArgs = @("$tmpOsLetter`:\Windows", '/s', "$tmpOsLetter`:", '/f', 'BIOS')
         }
-        Invoke-Proc 'bcdboot.exe' $bcdArgs | Out-Null
+        # Use explicit 64-bit path so bcdboot always runs as native 64-bit.
+        # Sysnative exists only for 32-bit processes and bypasses WOW64 file-system
+        # redirection to reach the real System32; fall back to System32 when already 64-bit.
+        $bcdbootExe = if ([System.Environment]::Is64BitProcess) {
+            "$env:SystemRoot\System32\bcdboot.exe"
+        } elseif (Test-Path "$env:SystemRoot\Sysnative\bcdboot.exe") {
+            "$env:SystemRoot\Sysnative\bcdboot.exe"
+        } else {
+            "$env:SystemRoot\System32\bcdboot.exe"
+        }
+        WLog "bcdboot.exe path: $bcdbootExe"
+        Invoke-Proc $bcdbootExe $bcdArgs | Out-Null
 
         $sync.BytesDone = $sync.TotalBytes
 
@@ -1129,6 +1148,12 @@ $guiTimer.Interval = 500
 
 $guiTimer.Add_Tick({
     try {
+    # Suppress non-terminating errors locally so that $ErrorActionPreference = 'Stop'
+    # (set at script scope) cannot trigger CheckActionPreference inside the timer tick.
+    # CheckActionPreference internally calls String.Format on the error message, which
+    # crashes when the message contains Activity ID GUIDs like {2ad3ad9f-...}.
+    $local:ErrorActionPreference = 'Continue'
+
     # ── Drain log queue ──
     $line = [string]''
     while ($sync.LogQueue.TryDequeue([ref]$line)) {
