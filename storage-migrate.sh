@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
-# Debian Storage Migration Script V2.9 - debug+fstab validation improvements
+# Debian Storage Migration Script V3.1 - mode selection menu, hh:mm:ss progress, ETA
 # Author: karen20ced4 + Copilot revisions
 # Repository: https://github.com/karen20ced4/NVME-Migrate
-# Version: 2.9
-# Date: 2025-10-27
+# Version: 3.1
+# Date: 2026-03-21
 #
-# Scop: migrare disc root si/sau LVM PV intre drive-uri. Include: dry-run, check, resume,
-#        robust fstab update, better device detection, resume for pvmove, metadata save.
+# Scop: migrare disc root si/sau LVM PV intre drive-uri; clonare disc de date (NTFS, exFAT, etc.).
+#        Include: dry-run, check, resume, robust fstab update, better device detection,
+#        resume for pvmove, metadata save, data-clone (dd) for USB/NTFS/exFAT drives,
+#        menu selectare mod, progress bar cu ETA si timp hh:mm:ss.
+#
+# NOTE FOR AI: Increment version by +0.1 and update the Date comment each time this file is modified.
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.9"
-SCRIPT_DATE="2025-10-27"
+SCRIPT_VERSION="3.1"
+SCRIPT_DATE="2026-03-21"
 SCRIPT_AUTHOR="karen20ced4"
 SCRIPT_REPO="https://github.com/karen20ced4/NVME-Migrate"
 
@@ -23,6 +27,9 @@ RESUME_MODE=false
 CHECK_MODE=false
 DEBUG_MODE=false
 BACKUP_DIR="/root/storage-migrate-backups"
+
+# User-chosen operation mode: auto | os-migration | data-clone
+USER_MODE_CHOICE="auto"
 RESUME_FILE="${BACKUP_DIR}/lvm-resume.sh"
 METADATA_FILE="${BACKUP_DIR}/migration-metadata.json"
 FSTAB_VALIDATE_LOG="${BACKUP_DIR}/fstab-validate.log"
@@ -33,7 +40,10 @@ TARGET_DISK=""
 MIGRATION_TYPE=""
 SOURCE_HAS_ROOT=false
 SOURCE_HAS_LVM=false
+SOURCE_HAS_DATA=false
 SOURCE_PVS=()
+SOURCE_DATA_PARTS=()
+SOURCE_DATA_FS_TYPES=()
 SOURCE_ROOT_DEV=""
 SOURCE_ROOT_SIZE_GB=0
 SOURCE_SWAP_SIZE_GB=0
@@ -75,6 +85,32 @@ if [ -t 1 ]; then
 else
   RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; MAGENTA=''; BOLD=''; DIM=''; NC=''
 fi
+
+# ── Time helpers ──────────────────────────────────────────────────────────────
+# Convert seconds to hh:mm:ss display string
+seconds_to_hms() {
+  local s="${1:-0}"
+  [[ "${s}" =~ ^[0-9]+$ ]] || s=0
+  printf "%02d:%02d:%02d" $((s/3600)) $(((s%3600)/60)) $((s%60))
+}
+
+# Draw a one-line animated progress bar:
+#   draw_transfer_progress <pct> <speed_mb> <elapsed_hms> <eta_hms>
+draw_transfer_progress() {
+  local pct="${1:-0}" speed_mb="${2:-0}"
+  local elapsed_str="${3:-00:00:00}" eta_str="${4:---:--:--}"
+  local w=40 filled empty
+  [ "${pct}" -gt 100 ] && pct=100
+  [ "${pct}" -lt 0   ] && pct=0
+  filled=$(( pct * w / 100 ))
+  empty=$(( w - filled ))
+  printf "\r  ${CYAN}[${GREEN}"
+  [ "${filled}" -gt 0 ] && printf "%${filled}s" | tr ' ' '█'
+  printf "${DIM}"
+  [ "${empty}"  -gt 0 ] && printf "%${empty}s"  | tr ' ' '░'
+  printf "${NC}${CYAN}]${NC} ${BOLD}%3d%%${NC}  ${GREEN}%4d MB/s${NC}  ⏱ ${CYAN}%s${NC}  ⏳ ${YELLOW}%s${NC}  " \
+    "${pct}" "${speed_mb}" "${elapsed_str}" "${eta_str}"
+}
 
 print_header() {
   echo -e "${CYAN}${BOLD}"
@@ -132,7 +168,52 @@ prompt_read() {
   printf "%s" "$input"
 }
 
-# select_disk_from_list
+# ── Operation mode selection ──────────────────────────────────────────────────
+# Displays a menu and sets USER_MODE_CHOICE to one of:
+#   os-migration | data-clone | auto
+select_operation_mode() {
+  echo -e "\n${CYAN}${BOLD}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}${BOLD}║  Selectare mod operare                                                     ║${NC}"
+  echo -e "${CYAN}${BOLD}╚════════════════════════════════════════════════════════════════════════════╝${NC}\n"
+  echo -e "${BOLD}Ce vrei să faci?${NC}\n"
+
+  echo -e "  ${CYAN}${BOLD}[1]${NC} ${BOLD}Migrare sistem (OS)${NC}"
+  echo -e "      Migrare disc root Linux pe un disc nou intern (SSD/NVMe/HDD, LVM)"
+  echo -e "      Sursa conține sistem de operare → destinație: disc nou intern"
+  echo ""
+  echo -e "  ${CYAN}${BOLD}[2]${NC} ${BOLD}Clonare disc de date${NC}"
+  echo -e "      Clonare sector-by-sector (NTFS, exFAT, USB HDD, orice tip de disc)"
+  echo -e "      Exemplu: clonare HDD USB NTFS 4TB pe alt HDD USB NTFS 4TB"
+  echo ""
+  echo -e "  ${CYAN}${BOLD}[3]${NC} ${BOLD}Auto-detectare${NC} ${DIM}(implicit — scriptul decide singur)${NC}"
+  echo ""
+
+  while true; do
+    local choice
+    choice=$(prompt_read "${CYAN}${BOLD}Alege [1/2/3, implicit 3]: ${NC}" "3")
+    choice=$(echo "${choice}" | tr -d '[:space:]')
+    case "${choice}" in
+      1)
+        USER_MODE_CHOICE="os-migration"
+        print_success "Mod selectat: ${BOLD}Migrare sistem (OS)${NC}"
+        return 0
+        ;;
+      2)
+        USER_MODE_CHOICE="data-clone"
+        print_success "Mod selectat: ${BOLD}Clonare disc de date${NC}"
+        return 0
+        ;;
+      3|"")
+        USER_MODE_CHOICE="auto"
+        print_success "Mod selectat: ${BOLD}Auto-detectare${NC}"
+        return 0
+        ;;
+      *)
+        print_warning "Alegere invalidă. Introdu 1, 2 sau 3."
+        ;;
+    esac
+  done
+}
 select_disk_from_list() {
   local __resultvar="$1"
   local prompt_title="$2"
@@ -356,9 +437,11 @@ detect_vgs_on_disk() {
 
 scan_disk_usage() {
   local disk="$1"
-  local has_root=false has_lvm=false has_swap=false
+  local has_root=false has_lvm=false has_swap=false has_data=false
   local -a pvs_found=()
   local -a mountpoints=()
+  local -a data_parts=()
+  local -a data_fs_types=()
   local root_dev="" root_size_gb=0 swap_size_gb=0
 
   log_message "Scanning disk usage for: ${disk}"
@@ -394,16 +477,30 @@ scan_disk_usage() {
       swap_size_gb=$(( (swap_bytes + 1024**3 - 1) / 1024**3 ))
       log_message "  Found swap: ${part} (${swap_size_gb} GB)"
     fi
+    # Detect data partitions (non-root, non-LVM, non-swap) — covers NTFS, exFAT, ext4, etc.
+    local fs_type
+    fs_type=$(blkid -o value -s TYPE "${part}" 2>/dev/null || true)
+    if [ -n "${fs_type}" ] && [ "${fs_type}" != "swap" ] && [ "${fs_type}" != "LVM2_member" ]; then
+      if [ "${part}" != "${root_dev}" ]; then
+        has_data=true
+        data_parts+=("${part}")
+        data_fs_types+=("${fs_type}")
+        log_message "  Found data partition: ${part} type=${fs_type}"
+      fi
+    fi
   done < <(lsblk -no PATH,TYPE "${disk}" 2>/dev/null | awk '$2=="part" {print $1}')
 
   # output safe for parsing (no mountpoints line)
   printf 'has_root=%q\n' "${has_root}"
   printf 'has_lvm=%q\n' "${has_lvm}"
   printf 'has_swap=%q\n' "${has_swap}"
+  printf 'has_data=%q\n' "${has_data}"
   printf 'root_dev=%q\n' "${root_dev}"
   printf 'root_size_gb=%q\n' "${root_size_gb}"
   printf 'swap_size_gb=%q\n' "${swap_size_gb}"
   printf 'pvs=%q\n' "${pvs_found[*]}"
+  printf 'data_parts=%q\n' "${data_parts[*]:-}"
+  printf 'data_fs_types=%q\n' "${data_fs_types[*]:-}"
   # note: mountpoints intentionally omitted to avoid parse issues in detect_source_type
 }
 
@@ -421,10 +518,13 @@ detect_source_type() {
   SOURCE_HAS_ROOT=false
   SOURCE_HAS_LVM=false
   SOURCE_HAS_SWAP=false
+  SOURCE_HAS_DATA=false
   SOURCE_ROOT_DEV=""
   SOURCE_ROOT_SIZE_GB=0
   SOURCE_SWAP_SIZE_GB=0
   SOURCE_PVS=()
+  SOURCE_DATA_PARTS=()
+  SOURCE_DATA_FS_TYPES=()
   # Parse scan output line-by-line (no eval)
   while IFS='=' read -r key val; do
     # strip the surrounding single quotes from val if present
@@ -434,6 +534,7 @@ detect_source_type() {
       has_root) SOURCE_HAS_ROOT="$val" ;;
       has_lvm) SOURCE_HAS_LVM="$val" ;;
       has_swap) SOURCE_HAS_SWAP="$val" ;;
+      has_data) SOURCE_HAS_DATA="$val" ;;
       root_dev) SOURCE_ROOT_DEV="$val" ;;
       root_size_gb) SOURCE_ROOT_SIZE_GB="$val" ;;
       swap_size_gb) SOURCE_SWAP_SIZE_GB="$val" ;;
@@ -445,6 +546,20 @@ detect_source_type() {
           SOURCE_PVS=()
         fi
         ;;
+      data_parts)
+        if [ -n "$val" ]; then
+          IFS=' ' read -r -a SOURCE_DATA_PARTS <<< "$val"
+        else
+          SOURCE_DATA_PARTS=()
+        fi
+        ;;
+      data_fs_types)
+        if [ -n "$val" ]; then
+          IFS=' ' read -r -a SOURCE_DATA_FS_TYPES <<< "$val"
+        else
+          SOURCE_DATA_FS_TYPES=()
+        fi
+        ;;
       mountpoints)
         # currently ignored; kept for future use
         ;;
@@ -454,7 +569,7 @@ detect_source_type() {
     esac
   done < <(scan_disk_usage "${SOURCE_DISK}")
 
-  log_message "Detection results: root=${SOURCE_HAS_ROOT}, lvm=${SOURCE_HAS_LVM}, root_dev=${SOURCE_ROOT_DEV}, root_size_gb=${SOURCE_ROOT_SIZE_GB}"
+  log_message "Detection results: root=${SOURCE_HAS_ROOT}, lvm=${SOURCE_HAS_LVM}, data=${SOURCE_HAS_DATA}, root_dev=${SOURCE_ROOT_DEV}, root_size_gb=${SOURCE_ROOT_SIZE_GB}"
 
   if [ "${SOURCE_HAS_LVM}" = true ]; then
     readarray -t DETECTED_VGS < <(detect_vgs_on_disk "${SOURCE_DISK}")
@@ -470,6 +585,8 @@ detect_source_type() {
     MIGRATION_TYPE="root-only"
   elif [ "${SOURCE_HAS_LVM}" = true ]; then
     MIGRATION_TYPE="lvm-only"
+  elif [ "${SOURCE_HAS_DATA}" = true ]; then
+    MIGRATION_TYPE="data-clone"
   else
     MIGRATION_TYPE="empty"
   fi
@@ -634,6 +751,12 @@ generate_migration_plan() {
       echo -e "  ${GREEN}▸${NC} Volume Groups detectate: ${DETECTED_VGS[*]}"
     fi
   fi
+  if [ "${SOURCE_HAS_DATA}" = true ] && [ "${#SOURCE_DATA_PARTS[@]}" -gt 0 ]; then
+    echo -e "  ${CYAN}▸${NC} Partiții de date detectate:"
+    for i in "${!SOURCE_DATA_PARTS[@]}"; do
+      echo -e "    • ${SOURCE_DATA_PARTS[$i]} → ${SOURCE_DATA_FS_TYPES[$i]:-?}"
+    done
+  fi
   [ "${SOURCE_SWAP_SIZE_GB}" -gt 0 ] && echo -e "  ${YELLOW}▸${NC} Swap: ${SOURCE_SWAP_SIZE_GB} GB"
 
   disk_info=$(get_disk_info "${TARGET_DISK}")
@@ -680,6 +803,16 @@ generate_migration_plan() {
       echo "  6. pvmove"
       echo "  7. Actualizare fstab (atomic) & initramfs"
       ;;
+    data-clone)
+      local fs_list="${SOURCE_DATA_FS_TYPES[*]:-necunoscute}"
+      echo -e "${DIM}Disc-ul sursă conține partiții de date (${fs_list}).${NC}"
+      echo -e "${DIM}Clonare sector-by-sector cu 'dd'. Sistemul de boot nu este modificat.${NC}\n"
+      echo -e "${BOLD}Pași:${NC}"
+      echo "  1. Demontare partiții sursă și destinație (dacă sunt montate)"
+      echo "  2. Clonare sector-by-sector: dd if=${SOURCE_DISK} of=${TARGET_DISK} bs=4M"
+      echo "  3. sync — sincronizare buffere"
+      echo "  4. Verificare NTFS cu ntfsfix (dacă partiții NTFS)"
+      ;;
     empty)
       print_warning "Disk sursă pare gol sau neformatat. Verifică selecția!"
       ;;
@@ -689,6 +822,10 @@ generate_migration_plan() {
   if [ "${MIGRATION_TYPE}" = "lvm-only" ]; then
     echo "  ⚠ pvmove poate dura ore întregi; NU întrerupe!"
     echo "  ✔ Serverul poate rămâne pornit în timpul migrării."
+  elif [ "${MIGRATION_TYPE}" = "data-clone" ]; then
+    echo "  ⚠ Clonarea unui disc mare (4TB) poate dura 2-6 ore; NU întrerupe!"
+    echo "  ⚠ TOATE datele de pe discul destinație (${TARGET_DISK}) vor fi ȘTERSE."
+    echo "  ✔ Discul sursă (${SOURCE_DISK}) nu va fi modificat."
   else
     echo "  ⚠ După migrare: oprește serverul și înlocuiește fizic discul."
     echo "  ⚠ Testează boot-ul după înlocuire!"
@@ -705,6 +842,7 @@ show_dry_run() {
   case "${MIGRATION_TYPE}" in
     lvm-only) show_dry_run_lvm ;;
     root-only|full-disk) show_dry_run_root ;;
+    data-clone) show_dry_run_data ;;
   esac
   echo -e "\n${MAGENTA}${BOLD}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
   DRY_RUN_MODE=false
@@ -764,6 +902,216 @@ show_dry_run_root() {
     log_command grub-install --target=i386-pc "${TARGET_DISK}" || true
   fi
   log_command awk 'BEGIN{print "fstab update (dry-run)"}' /mnt/newroot/etc/fstab || true
+}
+
+show_dry_run_data() {
+  print_dry_run "Comenzi pentru clonare disc de date (NTFS/exFAT/etc):"
+  # Unmount source partitions
+  local part
+  while IFS= read -r part; do
+    log_command umount "${part}" || true
+  done < <(lsblk -no PATH,TYPE "${SOURCE_DISK}" 2>/dev/null | awk '$2=="part" {print $1}')
+  # Unmount target partitions
+  while IFS= read -r part; do
+    log_command umount "${part}" || true
+  done < <(lsblk -no PATH,TYPE "${TARGET_DISK}" 2>/dev/null | awk '$2=="part" {print $1}')
+  # Sector-by-sector clone
+  log_command dd if="${SOURCE_DISK}" of="${TARGET_DISK}" bs=4M conv=sync,noerror status=progress || true
+  log_command sync || true
+  # ntfsfix on first NTFS partition (example)
+  local tgt_part1; tgt_part1=$(get_part_name "${TARGET_DISK}" 1)
+  log_command ntfsfix -d "${tgt_part1}" || true
+}
+
+# ── DD with live progress bar ─────────────────────────────────────────────────
+# run_dd_with_progress <src_disk> <dst_disk> <total_bytes>
+# Uses pv if available; otherwise monitors /proc/<pid>/io with a custom progress bar.
+run_dd_with_progress() {
+  local src="$1" dst="$2" total_bytes="${3:-0}"
+  local start_ts; start_ts=$(date +%s)
+
+  # ── Option A: pv is installed ──────────────────────────────────────────────
+  if command -v pv >/dev/null 2>&1; then
+    print_info "pv detectat — se folosește pentru progress bar detaliat."
+    ( set -o pipefail
+      pv -pterbs "${total_bytes}" -N " Clonare disc" "${src}" | \
+        dd of="${dst}" bs=4M conv=noerror,sync 2>>"${LOG_FILE}"
+    )
+    local rc=$?
+    local elapsed=$(( $(date +%s) - start_ts ))
+    if [ "${elapsed}" -gt 0 ] && [ "${total_bytes}" -gt 0 ]; then
+      local avg_mb=$(( total_bytes / elapsed / 1048576 ))
+      print_success "Clonare completă!  Viteză medie: ${avg_mb} MB/s  |  Timp total: $(seconds_to_hms "${elapsed}")"
+    fi
+    return "${rc}"
+  fi
+
+  # ── Option B: custom monitor via /proc/<pid>/io ────────────────────────────
+  local dd_log; dd_log=$(mktemp /tmp/dd-progress-XXXXXX)
+  # dd writes progress to stderr; we capture it so it does not clutter the terminal
+  dd if="${src}" of="${dst}" bs=4M conv=sync,noerror status=progress 2>"${dd_log}" &
+  local dd_pid=$!
+  log_message "dd started: PID=${dd_pid} src=${src} dst=${dst} total_bytes=${total_bytes}"
+
+  echo ""
+  while kill -0 "${dd_pid}" 2>/dev/null; do
+    sleep 1
+
+    local now; now=$(date +%s)
+    local elapsed=$(( now - start_ts ))
+    local elapsed_str; elapsed_str=$(seconds_to_hms "${elapsed}")
+
+    # Primary: read bytes written from /proc/<pid>/io (most accurate)
+    local bytes_done=0
+    if [ -e "/proc/${dd_pid}/io" ] && [ -r "/proc/${dd_pid}/io" ]; then
+      bytes_done=$(awk '/^write_bytes:/{print $2}' "/proc/${dd_pid}/io" 2>/dev/null || echo 0)
+    fi
+    # Fallback: parse last line of dd's status output
+    if ! [[ "${bytes_done}" =~ ^[0-9]+$ ]] || [ "${bytes_done}" -eq 0 ]; then
+      local last_line
+      last_line=$(tr '\r' '\n' < "${dd_log}" 2>/dev/null | grep -oP '^\d+.*' | tail -1 || echo "")
+      bytes_done=$(echo "${last_line}" | grep -oP '^\d+' || echo 0)
+      [[ "${bytes_done}" =~ ^[0-9]+$ ]] || bytes_done=0
+    fi
+
+    if [ "${bytes_done}" -gt 0 ] && [ "${total_bytes}" -gt 0 ]; then
+      local pct=$(( bytes_done * 100 / total_bytes ))
+      local speed_bps=0 speed_mb=0 eta_str="--:--:--"
+      [ "${elapsed}" -gt 0 ] && speed_bps=$(( bytes_done / elapsed ))
+      [ "${speed_bps}" -gt 0 ] && speed_mb=$(( speed_bps / 1048576 ))
+      if [ "${speed_bps}" -gt 0 ]; then
+        local remaining=$(( total_bytes - bytes_done ))
+        [ "${remaining}" -lt 0 ] && remaining=0
+        eta_str=$(seconds_to_hms $(( remaining / speed_bps )))
+      fi
+      draw_transfer_progress "${pct}" "${speed_mb}" "${elapsed_str}" "${eta_str}"
+    else
+      printf "\r  ⏱  Timp scurs: %s  (așteptare progres...)" "${elapsed_str}"
+    fi
+  done
+
+  wait "${dd_pid}"
+  local rc=$?
+  printf "\n"
+
+  # Append dd log to main log
+  cat "${dd_log}" >> "${LOG_FILE}" 2>/dev/null || true
+  rm -f "${dd_log}"
+
+  local elapsed_final=$(( $(date +%s) - start_ts ))
+  log_message "dd completed in ${elapsed_final}s (exit: ${rc})"
+  if [ "${elapsed_final}" -gt 0 ] && [ "${total_bytes}" -gt 0 ]; then
+    local avg_mb=$(( total_bytes / elapsed_final / 1048576 ))
+    print_info "Viteză medie: ${avg_mb} MB/s  |  Timp total dd: $(seconds_to_hms "${elapsed_final}")"
+  fi
+  return "${rc}"
+}
+
+migrate_data_clone() {
+  print_info "Începe clonare disc de date (sector-by-sector cu dd)..."
+
+  local src_bytes tgt_bytes
+  src_bytes=$(lsblk -bdn -o SIZE "${SOURCE_DISK}" 2>/dev/null || echo 0)
+  tgt_bytes=$(lsblk -bdn -o SIZE "${TARGET_DISK}" 2>/dev/null || echo 0)
+  if ! [[ "${src_bytes}" =~ ^[0-9]+$ ]]; then src_bytes=0; fi
+  if ! [[ "${tgt_bytes}" =~ ^[0-9]+$ ]]; then tgt_bytes=0; fi
+
+  local src_gb tgt_gb
+  src_gb=$(( src_bytes / 1024 / 1024 / 1024 ))
+  tgt_gb=$(( tgt_bytes / 1024 / 1024 / 1024 ))
+
+  if [ "${tgt_bytes}" -lt "${src_bytes}" ]; then
+    print_error "Discul destinație (${tgt_gb}GB) este mai mic decât sursa (${src_gb}GB)!"
+    print_error "Clonarea sector-by-sector necesită disc destinație >= sursă."
+    return 1
+  fi
+
+  if [ "${tgt_bytes}" -gt "${src_bytes}" ]; then
+    print_info "Discul destinație (${tgt_gb}GB) > sursă (${src_gb}GB)."
+    print_info "Spațiul extra (~$((tgt_gb - src_gb))GB) nu va fi utilizat automat după clonare."
+  fi
+
+  # --- Step: unmount partitions ---
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Demontare partiții sursă și destinație"
+
+  local unmount_ok=true disk
+  for disk in "${SOURCE_DISK}" "${TARGET_DISK}"; do
+    while read -r part; do
+      [ -z "${part}" ] && continue
+      local mp
+      mp=$(findmnt -no TARGET "${part}" 2>/dev/null || true)
+      if [ -n "${mp}" ]; then
+        print_info "Demontare ${part} (montat la ${mp})..."
+        if ! umount "${part}" 2>/dev/null; then
+          if ! umount -l "${part}" 2>/dev/null; then
+            print_warning "Nu am putut demonta ${part} de la ${mp}. Verifică dacă este în uz."
+            unmount_ok=false
+          fi
+        fi
+      fi
+    done < <(lsblk -no PATH,TYPE "${disk}" 2>/dev/null | awk '$2=="part" {print $1}')
+  done
+
+  if [ "${unmount_ok}" = false ]; then
+    print_warning "Unele partiții nu au putut fi demontate. Continuarea poate duce la date corupte."
+    if ! confirm_action "Continui oricum (pe propriul risc)?" "no"; then
+      return 1
+    fi
+  else
+    print_success "Toate partițiile au fost demontate."
+  fi
+
+  udevadm settle --timeout="${UDEV_SETTLE_TIMEOUT}" 2>/dev/null || true
+  sleep 1
+
+  # --- Step: dd clone ---
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Clonare disc de date (dd sector-by-sector)"
+  print_warning "Clonarea unui disc de ${src_gb}GB poate dura câteva ore (4TB ≈ 2-6h)!"
+  print_info "Se monitorizează progresul în timp real cu progress bar + ETA."
+
+  if ! run_dd_with_progress "${SOURCE_DISK}" "${TARGET_DISK}" "${src_bytes}"; then
+    print_error "Clonare dd a eșuat!"
+    return 1
+  fi
+
+  print_info "Sincronizare buffere..."
+  log_command sync
+  print_success "Clonare completă! ${TARGET_DISK} este acum o copie a lui ${SOURCE_DISK}."
+
+  # --- Step: ntfsfix on NTFS partitions ---
+  udevadm settle --timeout="${UDEV_SETTLE_TIMEOUT}" 2>/dev/null || true
+  sleep 2
+  log_command partprobe "${TARGET_DISK}" 2>/dev/null || true
+  udevadm settle --timeout="${UDEV_SETTLE_TIMEOUT}" 2>/dev/null || true
+  sleep 1
+
+  if command -v ntfsfix >/dev/null 2>&1; then
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Verificare și reparare NTFS pe discul clonat"
+    local ntfsfix_count=0
+    while read -r part; do
+      [ -z "${part}" ] && continue
+      local fs
+      fs=$(blkid -o value -s TYPE "${part}" 2>/dev/null || true)
+      if [ "${fs}" = "ntfs" ]; then
+        print_info "ntfsfix -d ${part} (marchează partiția NTFS ca curată)..."
+        log_command ntfsfix -d "${part}" || print_warning "ntfsfix a returnat o eroare pentru ${part} (poate fi ignorat)"
+        ntfsfix_count=$((ntfsfix_count + 1))
+      fi
+    done < <(lsblk -no PATH,TYPE "${TARGET_DISK}" 2>/dev/null | awk '$2=="part" {print $1}')
+    if [ "${ntfsfix_count}" -gt 0 ]; then
+      print_success "ntfsfix rulat pe ${ntfsfix_count} partiție(i) NTFS."
+    else
+      print_info "Nu s-au găsit partiții NTFS pe ${TARGET_DISK} după clonare."
+    fi
+  else
+    print_info "ntfsfix nu este instalat. Partiții NTFS vor fi verificate la prima montare în Windows."
+  fi
+
+  print_success "Clonare disc de date completă!"
+  return 0
 }
 
 cleanup_mounts() {
@@ -1040,6 +1388,7 @@ migrate_root_disk() {
 
   # run rsync and treat exit 24 as non-fatal
   log_message "About to run rsync -> /mnt/newroot"
+  local rsync_start_ts; rsync_start_ts=$(date +%s)
   if ! log_interactive_command rsync -aAXH --partial --info=progress2 "${rsync_excludes_list[@]}" / /mnt/newroot; then
     local rsync_exit=$?
     if [ "${rsync_exit}" -eq 24 ]; then
@@ -1051,7 +1400,8 @@ migrate_root_disk() {
       return 1
     fi
   fi
-  print_success "Sistem sincronizat."
+  local rsync_elapsed=$(( $(date +%s) - rsync_start_ts ))
+  print_success "Sistem sincronizat în $(seconds_to_hms "${rsync_elapsed}")."
 
   # bind mounts for chroot
   print_info "Montare pseudo-filesystems..."
@@ -1331,6 +1681,9 @@ main() {
   if [ "${EUID}" -ne 0 ]; then print_error "Scriptul trebuie rulat ca root!"; exit 1; fi
   mkdir -p "${BACKUP_DIR}"
 
+  # ── Mode selection menu ────────────────────────────────────────────────────
+  select_operation_mode
+
   CURRENT_STEP=$((CURRENT_STEP + 1))
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Verificare comenzi necesare"
   required_cmds=(parted lsblk rsync mkfs.ext4 mkswap pvcreate vgextend pvmove vgreduce blkid grub-install update-grub mkfs.fat partprobe udevadm pvs vgs lvs findmnt mount umount chroot blockdev df mountpoint awk e2fsck)
@@ -1453,13 +1806,20 @@ fi
   
   print_success "Toate comenzile necesare sunt disponibile"
 
-  CURRENT_STEP=$((CURRENT_STEP + 1))
-  print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Detectare mod boot (UEFI / BIOS)"
-  if [ -d /sys/firmware/efi ]; then BOOT_MODE="UEFI"; else BOOT_MODE="BIOS"; fi
-  print_info "Sistem detectat ca: ${GREEN}${BOLD}${BOOT_MODE}${NC}"
-  read -rp "$(echo -e ${CYAN}Confirmi ${BOOT_MODE} sau schimbi? [BIOS/UEFI/ENTER păstrează]: ${NC})" USER_BOOT
-  if [[ -n "${USER_BOOT}" && "${USER_BOOT}" =~ ^(BIOS|UEFI)$ ]]; then BOOT_MODE="${USER_BOOT}"; print_warning "Boot mode suprascris: ${BOOT_MODE}"; fi
-  print_success "Boot mode: ${BOLD}${BOOT_MODE}${NC}"
+  # ── Boot mode detection (only needed for OS migration) ────────────────────
+  if [ "${USER_MODE_CHOICE}" != "data-clone" ]; then
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Detectare mod boot (UEFI / BIOS)"
+    if [ -d /sys/firmware/efi ]; then BOOT_MODE="UEFI"; else BOOT_MODE="BIOS"; fi
+    print_info "Sistem detectat ca: ${GREEN}${BOLD}${BOOT_MODE}${NC}"
+    read -rp "$(echo -e ${CYAN}Confirmi ${BOOT_MODE} sau schimbi? [BIOS/UEFI/ENTER păstrează]: ${NC})" USER_BOOT
+    if [[ -n "${USER_BOOT}" && "${USER_BOOT}" =~ ^(BIOS|UEFI)$ ]]; then BOOT_MODE="${USER_BOOT}"; print_warning "Boot mode suprascris: ${BOOT_MODE}"; fi
+    print_success "Boot mode: ${BOLD}${BOOT_MODE}${NC}"
+  else
+    # For data-clone, boot mode is irrelevant; default to BIOS to satisfy any downstream checks
+    BOOT_MODE="N/A"
+    print_info "Mod clonare disc: detecție UEFI/BIOS omisă."
+  fi
 
   CURRENT_STEP=$((CURRENT_STEP + 1))
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Detectare root curent"
@@ -1509,19 +1869,55 @@ fi
     break
   done
 
-  # Detectare USB și avertisment pentru reinstalare GRUB
+  # Detectare tip migrare ÎNAINTE de avertismentul USB (pentru mesaje contextuale)
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Analiză configurație și tip migrare"
+  detect_source_type
+
+  # ── Apply user mode choice override ───────────────────────────────────────
+  if [ "${USER_MODE_CHOICE}" = "data-clone" ]; then
+    if [ "${MIGRATION_TYPE}" != "data-clone" ]; then
+      if [ "${SOURCE_HAS_ROOT}" = true ]; then
+        print_warning "Discul sursă conține un sistem de operare, dar modul 'Clonare disc' a fost ales explicit."
+        print_info "Se va folosi clonare sector-by-sector (dd). Sistemul de pe sursa NU va fi modificat."
+      fi
+      MIGRATION_TYPE="data-clone"
+    fi
+  elif [ "${USER_MODE_CHOICE}" = "os-migration" ] && [ "${MIGRATION_TYPE}" = "data-clone" ]; then
+    print_error "Discul sursă nu pare să conțină un sistem de operare detectabil!"
+    print_info "Încearcă modul 'Auto-detectare' sau 'Clonare disc de date'."
+    exit 1
+  fi
+
+  case "${MIGRATION_TYPE}" in
+    lvm-only)   print_info "Tip migrare: LVM PV-ONLY" ;;
+    root-only)  print_info "Tip migrare: ROOT DISK" ;;
+    full-disk)  print_info "Tip migrare: FULL DISK (Root + LVM)" ;;
+    data-clone) print_info "Tip migrare: CLONARE DISC DE DATE (${SOURCE_DATA_FS_TYPES[*]:-NTFS/exFAT/ext4})" ;;
+    empty)      print_error "Disk sursă pare gol sau fără date detectabile!"; exit 1 ;;
+    *)          print_error "Tip migrare necunoscut: ${MIGRATION_TYPE}"; exit 1 ;;
+  esac
+
+  # Detectare USB și avertisment (conștient de tipul de migrare)
   TARGET_IS_USB=false
   if lsblk -dno TRAN "${TARGET_DISK}" 2>/dev/null | grep -qE '^usb'; then
     TARGET_IS_USB=true
     print_warning "⚠️  Discul destinație ${TARGET_DISK} este conectat prin USB!"
-    echo -e "${YELLOW}${BOLD}IMPORTANT:${NC}"
-    echo -e "  După ce migrarea se termină, va trebui să:"
-    echo -e "  1. Oprești calculatorul complet"
-    echo -e "  2. Muți fizic noul SSD intern (în locul celui vechi)"
-    echo -e "  3. Bootezi de pe un USB Live Linux"
-    echo -e "  4. Reinstalezi GRUB pe noul disc (acum intern):"
-    echo -e "     ${CYAN}sudo grub-install /dev/sda && sudo update-grub${NC}"
-    echo -e "  5. SAU folosești scriptul generat automat care va fi salvat în ${BACKUP_DIR}"
+    if [ "${MIGRATION_TYPE}" = "data-clone" ]; then
+      echo -e "${YELLOW}${BOLD}IMPORTANT - Clonare disc de date USB:${NC}"
+      echo -e "  Discul sursă ${SOURCE_DISK} va fi clonat sector-by-sector pe ${TARGET_DISK}."
+      echo -e "  Discul destinație va fi COMPLET SUPRASCRIS."
+      echo -e "  Nu sunt necesari pași suplimentari după clonare (fără GRUB, fără reboot)."
+    else
+      echo -e "${YELLOW}${BOLD}IMPORTANT:${NC}"
+      echo -e "  După ce migrarea se termină, va trebui să:"
+      echo -e "  1. Oprești calculatorul complet"
+      echo -e "  2. Muți fizic noul SSD intern (în locul celui vechi)"
+      echo -e "  3. Bootezi de pe un USB Live Linux"
+      echo -e "  4. Reinstalezi GRUB pe noul disc (acum intern):"
+      echo -e "     ${CYAN}sudo grub-install /dev/sda && sudo update-grub${NC}"
+      echo -e "  5. SAU folosești scriptul generat automat care va fi salvat în ${BACKUP_DIR}"
+    fi
     echo ""
     if ! confirm_action "Ai înțeles acești pași și vrei să continui?" "no"; then
       print_info "Operațiune anulată."
@@ -1538,17 +1934,6 @@ fi
       exit 0
     fi
   fi
-
-  CURRENT_STEP=$((CURRENT_STEP + 1))
-  print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Analiză configurație și tip migrare"
-  detect_source_type
-  case "${MIGRATION_TYPE}" in
-    lvm-only) print_info "Tip migrare: LVM PV-ONLY" ;;
-    root-only) print_info "Tip migrare: ROOT DISK" ;;
-    full-disk) print_info "Tip migrare: FULL DISK (Root + LVM)" ;;
-    empty) print_error "Disk sursă pare gol sau fără date detectabile!"; exit 1 ;;
-    *) print_error "Tip migrare necunoscut: ${MIGRATION_TYPE}"; exit 1 ;;
-  esac
 
   if [[ "${MIGRATION_TYPE}" == "root-only" || "${MIGRATION_TYPE}" == "full-disk" ]]; then
     CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -1622,12 +2007,15 @@ fi
     root-only|full-disk)
       migrate_root_disk || { print_error "Migrare root disk a eșuat!"; log_message "Migration FAILED: root-disk"; exit 1; }
       ;;
+    data-clone)
+      migrate_data_clone || { print_error "Clonare disc a eșuat!"; log_message "Migration FAILED: data-clone"; exit 1; }
+      ;;
   esac
 
   log_message "=== MIGRATION COMPLETED ==="
 
-  # Generare script de reinstalare GRUB pentru cazul USB
-  if [ "${MIGRATION_TYPE}" != "lvm-only" ] && [ "${TARGET_IS_USB}" = true ]; then
+  # Generare script de reinstalare GRUB pentru cazul USB (nu pentru data-clone)
+  if [ "${MIGRATION_TYPE}" != "lvm-only" ] && [ "${MIGRATION_TYPE}" != "data-clone" ] && [ "${TARGET_IS_USB}" = true ]; then
     print_info "Generare script de reinstalare GRUB pentru discul USB mutat intern..."
     cat > "${BACKUP_DIR}/reinstall-grub-after-move.sh" <<'REINSTALL_EOF'
 #!/usr/bin/env bash
@@ -1708,7 +2096,16 @@ REINSTALL_EOF
   echo -e "Fstab validate log: ${BOLD}${FSTAB_VALIDATE_LOG}${NC}"
   echo -e "Backup-uri: ${BOLD}${BACKUP_DIR}${NC}\n"
 
-  if [ "${MIGRATION_TYPE}" != "lvm-only" ]; then
+  if [ "${MIGRATION_TYPE}" = "data-clone" ]; then
+    echo -e "${GREEN}${BOLD}✔ CE FACI MAI DEPARTE (Clonare disc de date):${NC}"
+    echo -e "  • Discul ${TARGET_DISK} este acum o copie exactă a lui ${SOURCE_DISK}."
+    echo -e "  • Verifică discul clonat: ${DIM}sudo lsblk -f ${TARGET_DISK}${NC}"
+    echo -e "  • Montează read-only pentru verificare:"
+    echo -e "    ${DIM}sudo mount -o ro $(get_part_name "${TARGET_DISK}" 1) /mnt && ls /mnt${NC}"
+    echo ""
+    print_warning "Discul sursă ${SOURCE_DISK} nu a fost modificat."
+    echo -e "${YELLOW}Verifică integritatea datelor înainte de a folosi discul clonat!${NC}\n"
+  elif [ "${MIGRATION_TYPE}" != "lvm-only" ]; then
     echo -e "${RED}${BOLD}⚠ CE FACI MAI DEPARTE :${NC}"
     echo -e "  1) Oprește serverul: ${DIM}sudo poweroff${NC}"
     echo -e "  2) Înlocuiește fizic discul: scoate ${SOURCE_DISK} și pune ${TARGET_DISK} în locul său"

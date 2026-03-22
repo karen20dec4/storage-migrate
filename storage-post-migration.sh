@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# post-migration.sh v2.4 - Final LVM detection fix + syntax cleanup
+# storage-post-migration.sh v2.6 - hh:mm:ss time display in step table
+# Date: 2026-03-21
 # - Summary-mode by default (concise console output)
 # - Verbose mode streams command output (useful for debugging)
 # - All detailed output is logged to LOG (default /root/storage-migrate-backups/post-migration.log)
+# - Graceful handling when initramfs/grub tools are absent (e.g. after data-clone)
 #
 # Usage:
-#   ./post-migration.sh                 # summary (concise, incremental step rows)
-#   ./post-migration.sh --verbose       # verbose (stream command output)
-#   ./post-migration.sh --quiet         # very quiet (only fatal errors)
-#   ./post-migration.sh --extend-lvm auto # auto-extend LVM
+#   ./storage-post-migration.sh                 # summary (concise, incremental step rows)
+#   ./storage-post-migration.sh --verbose       # verbose (stream command output)
+#   ./storage-post-migration.sh --quiet         # very quiet (only fatal errors)
+#   ./storage-post-migration.sh --extend-lvm auto # auto-extend LVM
+#
+# NOTE FOR AI: Increment version by +0.1 and update the Date comment each time this file is modified.
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.4"
+SCRIPT_VERSION="2.6"
 ROOT="/"
 MODE="preboot"
 FIX_RESUME="auto"
@@ -71,9 +75,9 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-post-migration.sh v2.4
+storage-post-migration.sh v2.6
 Usage:
-  ./post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
+  ./storage-post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:
   --postboot            run additional checks for a live system (post-boot audit)
   --verbose             stream detailed output to console + log
@@ -100,7 +104,13 @@ mkdir -p "$(dirname "${LOG}")"
 touch "${LOG}" || { ce "Cannot write log: ${LOG}"; exit 1; }
 
 _now() { date '+%Y-%m-%d %H:%M:%S'; }
-_ts() { date '+%s'; }
+_ts()  { date '+%s'; }
+# Convert seconds to hh:mm:ss display string
+_hms() {
+  local s="${1:-0}"
+  [[ "${s}" =~ ^[0-9]+$ ]] || s=0
+  printf "%02d:%02d:%02d" $((s/3600)) $(((s%3600)/60)) $((s%60))
+}
 
 # Logging primitives
 _log_write() { local ts; ts=$(_now); echo "[$ts] $*" >> "${LOG}"; }
@@ -146,8 +156,8 @@ step_start() {
     if [ "${VERBOSITY}" != "quiet" ]; then
       echo ""
       echo "$(_blue '--- post-migration progress ---')"
-      printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
-      echo "---------------------------------------------------------------------"
+      printf "%-3s  %-40s  %-8s   %-8s\n" "#" "STEP" "STATUS" "DURATĂ"
+      echo "-----------------------------------------------------------------------"
     fi
   fi
 }
@@ -168,7 +178,7 @@ step_print_row() {
     status_str="$(_yellow "${status}")"
   fi
   if [ "${VERBOSITY}" != "quiet" ]; then
-    printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
+    printf "%-3s  %-40s  %-8s   %-8s\n" "${num}" "${name:0:40}" "${status_str}" "$(_hms "${dur}")"
   fi
 }
 
@@ -481,6 +491,13 @@ extend_lvm_volumes() {
 rebuild_boot_artifacts() {
   step_start "Rebuild initramfs & grub"
   local realroot; realroot="$(readlink -f "${ROOT}")"
+
+  # Guard: skip gracefully if initramfs tools are not present (e.g. after a data-clone)
+  if ! command -v update-initramfs >/dev/null 2>&1 && ! command -v mkinitrd >/dev/null 2>&1; then
+    _log_write "update-initramfs not found — skipping (not a Debian/Ubuntu system or data-clone target)"
+    step_ok; return 0
+  fi
+
   if [ "${realroot}" = "/" ]; then
     local kcur; kcur="$(uname -r)"
     if ! run_cmd /usr/sbin/update-initramfs -u -k "${kcur}" -v; then
@@ -544,8 +561,8 @@ echo ""
 echo ""
 echo ""
 echo $(_blue "========== post-migration summary ==========")
-printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
-echo "---------------------------------------------------------------------"
+printf "%-3s  %-40s  %-8s   %-8s\n" "#" "STEP" "STATUS" "DURATĂ"
+echo "-----------------------------------------------------------------------"
 for i in "${!STEPS_NAME[@]}"; do
   num=$((i+1))
   name="${STEPS_NAME[$i]}"
@@ -558,11 +575,11 @@ for i in "${!STEPS_NAME[@]}"; do
   else
     status_str="$(_yellow "${status}")"
   fi
-  printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
+  printf "%-3s  %-40s  %-8s   %-8s\n" "${num}" "${name:0:40}" "${status_str}" "$(_hms "${dur}")"
 done
 total_dur=$(( $(_ts) - main_start ))
-echo "---------------------------------------------------------------------"
-echo "Total time: ${total_dur}s"
+echo "-----------------------------------------------------------------------"
+echo "Total time: $(_hms "${total_dur}")"
 echo ""
 echo "Detailed log: ${LOG}"
 echo $(_blue "=============================================")
