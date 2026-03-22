@@ -1,4 +1,4 @@
-### modificat de user
+### modificat de user v2
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -632,8 +632,8 @@ $Script:MigrateWorkerScript = {
 $form                  = New-Object System.Windows.Forms.Form
 $form.Text             = "Windows Storage Migration Tool  v$Script:AppVersion"
 # Taller window so all controls (incl. bottom buttons) are fully visible
-$form.Size             = New-Object System.Drawing.Size(1050, 960)
-$form.MinimumSize      = New-Object System.Drawing.Size(980, 870)
+$form.Size             = New-Object System.Drawing.Size(1070, 1000)
+$form.MinimumSize      = New-Object System.Drawing.Size(1070, 1000)
 $form.StartPosition    = 'CenterScreen'
 $form.BackColor        = [System.Drawing.Color]::FromArgb(240, 242, 246)
 # Base font +25%: 9 → 11  (applies to all controls that don't set their own font)
@@ -679,7 +679,7 @@ $grpMode.Font         = New-Object System.Drawing.Font('Segoe UI', 11, [System.D
 
 $rbMigrate            = New-Object System.Windows.Forms.RadioButton
 # Emoji removed: folder icon was here
-$rbMigrate.Text       = 'Migrare OS  (partition + robocopy + bcdboot — muta Windows pe disc nou)'
+$rbMigrate.Text       = 'Migrare OS  (partition + robocopy — muta Windows pe disc nou)'
 $rbMigrate.Location   = New-Object System.Drawing.Point(16, 26)
 $rbMigrate.Size       = New-Object System.Drawing.Size(494, 34)
 # Font +25%: 9 → 11
@@ -734,8 +734,8 @@ $cmbTarget.Font       = New-Object System.Drawing.Font('Consolas', 10.5)
 
 # Refresh button — circle-arrow (U+27F3) replaced with text "Ref." to avoid rendering as []
 $btnRefresh           = New-Object System.Windows.Forms.Button
-$btnRefresh.Text      = 'Ref.'
-$btnRefresh.Location  = New-Object System.Drawing.Point(920, 23)
+$btnRefresh.Text      = 'Refresh'
+$btnRefresh.Location  = New-Object System.Drawing.Point(935, 23)
 $btnRefresh.Size      = New-Object System.Drawing.Size(72, 36)
 # Font +25%: 10 → 12.5
 $btnRefresh.Font      = New-Object System.Drawing.Font('Segoe UI', 12.5)
@@ -877,7 +877,7 @@ $form.Controls.Add($grpLog)
 $pnlButtons           = New-Object System.Windows.Forms.Panel
 # Positioned so buttons are fully visible (form ~928px client area minus status strip ~24px = 904px)
 $pnlButtons.Location  = New-Object System.Drawing.Point(10, 874)
-$pnlButtons.Size      = New-Object System.Drawing.Size(1024, 56)
+$pnlButtons.Size      = New-Object System.Drawing.Size(1000, 56)
 $pnlButtons.Anchor    = 'Bottom,Left,Right'
 
 $chkDryRun            = New-Object System.Windows.Forms.CheckBox
@@ -891,7 +891,7 @@ $chkDryRun.Font       = New-Object System.Drawing.Font('Segoe UI', 11)
 # ▶ (U+25B6) is in standard Segoe UI — safe to keep
 $btnStart             = New-Object System.Windows.Forms.Button
 $btnStart.Text        = '▶  Pornire'
-$btnStart.Location    = New-Object System.Drawing.Point(754, 8)
+$btnStart.Location    = New-Object System.Drawing.Point(650, 8)
 $btnStart.Size        = New-Object System.Drawing.Size(152, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnStart.Font        = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
@@ -904,8 +904,8 @@ $btnStart.Cursor      = [System.Windows.Forms.Cursors]::Hand
 # ✕ (U+2715) is in standard Segoe UI — safe to keep
 $btnCancel            = New-Object System.Windows.Forms.Button
 $btnCancel.Text       = '✕  Anulare'
-$btnCancel.Location   = New-Object System.Drawing.Point(916, 8)
-$btnCancel.Size       = New-Object System.Drawing.Size(152, 42)
+$btnCancel.Location   = New-Object System.Drawing.Point(820, 8)
+$btnCancel.Size       = New-Object System.Drawing.Size(160, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnCancel.Font       = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
 $btnCancel.BackColor  = [System.Drawing.Color]::FromArgb(196, 43, 28)
@@ -982,7 +982,7 @@ function Invoke-UpdateGrids {
                 [void]$dgvSrc.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
             }
         }
-        $grpInfo.Text = "Partitii:  Disk $($sd.Index) — $($sd.Model)  (stanga = sursa, dreapta = tinta)"
+        $grpInfo.Text = "Partitii:  Disk $($sd.Index)  $($sd.Model)"
     }
 
     # Grila Destinație
