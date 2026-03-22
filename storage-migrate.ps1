@@ -632,8 +632,8 @@ $Script:MigrateWorkerScript = {
 $form                  = New-Object System.Windows.Forms.Form
 $form.Text             = "Windows Storage Migration Tool  v$Script:AppVersion"
 # Taller window so all controls (incl. bottom buttons) are fully visible
-$form.Size             = New-Object System.Drawing.Size(1070, 1000)
-$form.MinimumSize      = New-Object System.Drawing.Size(1070, 1000)
+$form.Size             = New-Object System.Drawing.Size(1500, 1000)
+$form.MinimumSize      = New-Object System.Drawing.Size(1500, 1000)
 $form.StartPosition    = 'CenterScreen'
 $form.BackColor        = [System.Drawing.Color]::FromArgb(240, 242, 246)
 # Base font +25%: 9 → 11  (applies to all controls that don't set their own font)
@@ -673,7 +673,7 @@ $form.Controls.Add($pnlHeader)
 $grpMode              = New-Object System.Windows.Forms.GroupBox
 $grpMode.Text         = 'Mod Operare'
 $grpMode.Location     = New-Object System.Drawing.Point(10, 86)
-$grpMode.Size         = New-Object System.Drawing.Size(1024, 80)
+$grpMode.Size         = New-Object System.Drawing.Size(1454, 80)
 $grpMode.Anchor       = 'Top,Left,Right'
 # Font +25%: 9 Bold → 11 Bold
 $grpMode.Font         = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
@@ -682,7 +682,7 @@ $rbMigrate            = New-Object System.Windows.Forms.RadioButton
 # Emoji removed: folder icon was here
 $rbMigrate.Text       = 'Migrare OS  (partition + robocopy — muta Windows pe disc nou)'
 $rbMigrate.Location   = New-Object System.Drawing.Point(16, 26)
-$rbMigrate.Size       = New-Object System.Drawing.Size(494, 34)
+$rbMigrate.Size       = New-Object System.Drawing.Size(703, 34)
 # Font +25%: 9 → 11
 $rbMigrate.Font       = New-Object System.Drawing.Font('Segoe UI', 11)
 $rbMigrate.Checked    = $true
@@ -690,8 +690,8 @@ $rbMigrate.Checked    = $true
 $rbClone              = New-Object System.Windows.Forms.RadioButton
 # Emoji removed: disc icon was here
 $rbClone.Text         = 'Clonare disc  (sector-by-sector, echivalent dd — orice tip de disc)'
-$rbClone.Location     = New-Object System.Drawing.Point(516, 26)
-$rbClone.Size         = New-Object System.Drawing.Size(494, 34)
+$rbClone.Location     = New-Object System.Drawing.Point(729, 26)
+$rbClone.Size         = New-Object System.Drawing.Size(703, 34)
 # Font +25%: 9 → 11
 $rbClone.Font         = New-Object System.Drawing.Font('Segoe UI', 11)
 
@@ -703,7 +703,7 @@ $form.Controls.Add($grpMode)
 $grpDisks             = New-Object System.Windows.Forms.GroupBox
 $grpDisks.Text        = 'Selectare discuri'
 $grpDisks.Location    = New-Object System.Drawing.Point(10, 174)
-$grpDisks.Size        = New-Object System.Drawing.Size(1024, 84)
+$grpDisks.Size        = New-Object System.Drawing.Size(1454, 84)
 $grpDisks.Anchor      = 'Top,Left,Right'
 
 # Source
@@ -765,7 +765,7 @@ $form.Controls.Add($grpDisks)
 $grpInfo              = New-Object System.Windows.Forms.GroupBox
 $grpInfo.Text         = 'Partitii disc sursa (stanga)  vs  disc tinta (dreapta)'
 $grpInfo.Location     = New-Object System.Drawing.Point(10, 266)
-$grpInfo.Size         = New-Object System.Drawing.Size(1024, 196)
+$grpInfo.Size         = New-Object System.Drawing.Size(1454, 196)
 $grpInfo.Anchor       = 'Top,Left,Right'
 
 function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
@@ -817,12 +817,12 @@ $form.Controls.Add($grpInfo)
 $grpProgress          = New-Object System.Windows.Forms.GroupBox
 $grpProgress.Text     = 'Progres transfer'
 $grpProgress.Location = New-Object System.Drawing.Point(10, 470)
-$grpProgress.Size     = New-Object System.Drawing.Size(1024, 148)
+$grpProgress.Size     = New-Object System.Drawing.Size(1454, 148)
 $grpProgress.Anchor   = 'Top,Left,Right'
 
 $progressBar          = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Location = New-Object System.Drawing.Point(8, 26)
-$progressBar.Size     = New-Object System.Drawing.Size(1004, 32)
+$progressBar.Size     = New-Object System.Drawing.Size(1434, 32)
 $progressBar.Minimum  = 0
 $progressBar.Maximum  = 100
 $progressBar.Style    = 'Continuous'
@@ -855,7 +855,7 @@ $lblDone.Anchor       = 'Top,Left'
 $lblElapsed           = New-Object System.Windows.Forms.Label
 # Stopwatch icon (U+23F1) removed — shows as [] without emoji font
 $lblElapsed.Text      = 'Timp scurs:   --:--:--'
-$lblElapsed.Location  = New-Object System.Drawing.Point(496, 70)
+$lblElapsed.Location  = New-Object System.Drawing.Point(926, 70)
 $lblElapsed.Size      = New-Object System.Drawing.Size(232, 28)
 $lblElapsed.ForeColor = [System.Drawing.Color]::DimGray
 $lblElapsed.Anchor    = 'Top,Right'
@@ -863,7 +863,7 @@ $lblElapsed.Anchor    = 'Top,Right'
 $lblEta               = New-Object System.Windows.Forms.Label
 # Hourglass icon (U+23F3) removed — shows as [] without emoji font
 $lblEta.Text          = 'Timp ramas:   --:--:--'
-$lblEta.Location      = New-Object System.Drawing.Point(736, 70)
+$lblEta.Location      = New-Object System.Drawing.Point(1166, 70)
 $lblEta.Size          = New-Object System.Drawing.Size(232, 28)
 $lblEta.ForeColor     = [System.Drawing.Color]::DimGray
 $lblEta.Anchor        = 'Top,Right'
@@ -872,7 +872,7 @@ $lblEta.Anchor        = 'Top,Right'
 $lblStep              = New-Object System.Windows.Forms.Label
 $lblStep.Text         = 'Pregatit. Selecteaza mod, sursa si destinatie, apoi apasa  Pornire.'
 $lblStep.Location     = New-Object System.Drawing.Point(8, 108)
-$lblStep.Size         = New-Object System.Drawing.Size(1004, 30)
+$lblStep.Size         = New-Object System.Drawing.Size(1434, 30)
 $lblStep.ForeColor    = [System.Drawing.Color]::FromArgb(40, 80, 160)
 # Font +25%: 8.5 Italic → 10.5 Italic
 $lblStep.Font         = New-Object System.Drawing.Font('Segoe UI', 10.5, [System.Drawing.FontStyle]::Italic)
@@ -886,12 +886,12 @@ $form.Controls.Add($grpProgress)
 $grpLog               = New-Object System.Windows.Forms.GroupBox
 $grpLog.Text          = 'Log operatiune'
 $grpLog.Location      = New-Object System.Drawing.Point(10, 626)
-$grpLog.Size          = New-Object System.Drawing.Size(1024, 240)
+$grpLog.Size          = New-Object System.Drawing.Size(1454, 240)
 $grpLog.Anchor        = 'Top,Left,Right,Bottom'
 
 $rtbLog               = New-Object System.Windows.Forms.RichTextBox
 $rtbLog.Location      = New-Object System.Drawing.Point(5, 20)
-$rtbLog.Size          = New-Object System.Drawing.Size(1012, 212)
+$rtbLog.Size          = New-Object System.Drawing.Size(1442, 212)
 $rtbLog.ReadOnly      = $true
 $rtbLog.BackColor     = [System.Drawing.Color]::FromArgb(15, 15, 25)
 $rtbLog.ForeColor     = [System.Drawing.Color]::FromArgb(200, 200, 210)
@@ -908,7 +908,7 @@ $form.Controls.Add($grpLog)
 #region ── Button panel ───────────────────────────────────────────────────────
 $pnlButtons           = New-Object System.Windows.Forms.Panel
 $pnlButtons.Location  = New-Object System.Drawing.Point(10, 874)
-$pnlButtons.Size      = New-Object System.Drawing.Size(1044, 56)
+$pnlButtons.Size      = New-Object System.Drawing.Size(1474, 56)
 $pnlButtons.Anchor    = 'Bottom,Left,Right'
 
 $chkDryRun            = New-Object System.Windows.Forms.CheckBox
@@ -924,7 +924,7 @@ $chkDryRun.Anchor     = 'Top,Left'
 # Start button: changed from blue to GREEN per user request
 $btnStart             = New-Object System.Windows.Forms.Button
 $btnStart.Text        = '▶  Pornire'
-$btnStart.Location    = New-Object System.Drawing.Point(570, 8)
+$btnStart.Location    = New-Object System.Drawing.Point(1000, 8)
 $btnStart.Size        = New-Object System.Drawing.Size(152, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnStart.Font        = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
@@ -939,7 +939,7 @@ $btnStart.Anchor      = 'Top,Right'
 # Cancel button: stays RED
 $btnCancel            = New-Object System.Windows.Forms.Button
 $btnCancel.Text       = '✕  Anulare'
-$btnCancel.Location   = New-Object System.Drawing.Point(730, 8)
+$btnCancel.Location   = New-Object System.Drawing.Point(1160, 8)
 $btnCancel.Size       = New-Object System.Drawing.Size(152, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnCancel.Font       = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
@@ -954,7 +954,7 @@ $btnCancel.Anchor     = 'Top,Right'
 # Exit button: BLUE — closes the application
 $btnExit              = New-Object System.Windows.Forms.Button
 $btnExit.Text         = 'Exit'
-$btnExit.Location     = New-Object System.Drawing.Point(890, 8)
+$btnExit.Location     = New-Object System.Drawing.Point(1320, 8)
 $btnExit.Size         = New-Object System.Drawing.Size(152, 42)
 $btnExit.Font         = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
 $btnExit.BackColor    = [System.Drawing.Color]::FromArgb(0, 120, 212)
