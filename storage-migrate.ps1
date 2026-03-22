@@ -527,6 +527,13 @@ $Script:MigrateWorkerScript = {
         WStep "Copiere fisiere OS: $srcOsLetter`: → $tmpOsLetter`: (robocopy)"
 
         $roboLog  = Join-Path $env:TEMP ('robocopy-{0}.log' -f (Get-Date -Format 'HHmmss'))
+
+        # Robocopy /XD does not support wildcard paths like C:\Users\*\AppData\Local\Temp.
+        # Enumerate actual per-user Temp directories at runtime and add each one individually.
+        $userTempDirs = @(Get-ChildItem -Path "$srcOsLetter`:\Users" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp' } |
+            Where-Object { Test-Path $_ })
+
         $roboArgs = @(
             "$srcOsLetter`:\", "$tmpOsLetter`:\",
             '/E',               # recurse including empty dirs
@@ -538,8 +545,8 @@ $Script:MigrateWorkerScript = {
             '/XD',
                 "$srcOsLetter`:\`$RECYCLE.BIN",
                 "$srcOsLetter`:\System Volume Information",
-                "$srcOsLetter`:\Windows\Temp",
-                "$srcOsLetter`:\Users\*\AppData\Local\Temp",
+                "$srcOsLetter`:\Windows\Temp"
+        ) + $userTempDirs + @(
             '/XF',
                 "$srcOsLetter`:\pagefile.sys",
                 "$srcOsLetter`:\swapfile.sys",
