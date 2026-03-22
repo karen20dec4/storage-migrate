@@ -338,8 +338,16 @@ $Script:MigrateWorkerScript = {
         $p.WaitForExit()
         $out = $outTask.Result
         $err = $errTask.Result
-        foreach ($l in ($out -split "`n")) { if ($l.Trim()) { WLog $l.Trim() } }
-        foreach ($l in ($err -split "`n")) { if ($l.Trim()) { WLog $l.Trim() 'WARN' } }
+        # Escape { and } so CheckActionPreference's internal String.Format cannot misinterpret
+        # Activity IDs or other braced tokens from external tools as format specifiers.
+        foreach ($l in ($out -split "`n")) {
+            $t = $l.Trim()
+            if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') }
+        }
+        foreach ($l in ($err -split "`n")) {
+            $t = $l.Trim()
+            if ($t) { WLog ($t -replace '\{', '{{' -replace '\}', '}}') 'WARN' }
+        }
         if (-not $AllowNonZero -and $p.ExitCode -ne 0) {
             throw "Comanda a esuat cu cod $($p.ExitCode): $cmdStr"
         }
@@ -426,7 +434,9 @@ $Script:MigrateWorkerScript = {
             try {
                 Clear-Disk -Number $dstDiskNumber -RemoveData -RemoveOEM -Confirm:$false -ErrorAction Stop
             } catch {
-                WLog "Clear-Disk avertisment: $_" 'WARN'
+                # Escape { and } so the exception text (e.g. "Activity ID: {guid}") cannot
+                # trigger a FormatException when PowerShell's error handling processes it.
+                WLog ("Clear-Disk avertisment: " + ([string]$_ -replace '\{', '{{' -replace '\}', '}}')) 'WARN'
             }
         }
 
@@ -1118,6 +1128,7 @@ $guiTimer          = New-Object System.Windows.Forms.Timer
 $guiTimer.Interval = 500
 
 $guiTimer.Add_Tick({
+    try {
     # ── Drain log queue ──
     $line = [string]''
     while ($sync.LogQueue.TryDequeue([ref]$line)) {
@@ -1203,6 +1214,15 @@ $guiTimer.Add_Tick({
         }
         $sync.IsDone    = $false
         $sync.IsRunning = $false
+    }
+    } catch {
+        # Guard against any unhandled exception in the timer tick (e.g. a FormatException
+        # triggered by PowerShell's CheckActionPreference when an error message contains
+        # unescaped curly braces from external-tool output like DiskPart Activity IDs).
+        # Escape braces in the caught exception text before displaying, to prevent a
+        # recursive format failure in Write-GuiLog or subsequent error handling.
+        $errText = ([string]$_) -replace '\{', '{{' -replace '\}', '}}'
+        try { Write-GuiLog "[$((Get-Date).ToString('HH:mm:ss'))] [ERROR] Exceptie timer intern: $errText" } catch {}
     }
 })
 
