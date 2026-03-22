@@ -393,18 +393,18 @@ $Script:MigrateWorkerScript = {
         }
 
         $isUEFI    = ($srcDisk.PartitionStyle -eq 'GPT') -and ($null -ne $efiPart)
-        $efiSizeMB = if ($efiPart)   { [math]::Max(100, [math]::Floor($efiPart.Size   / 1MB)) } else { 100 }
-        $msrSizeMB = if ($msrPart)   { [math]::Max(16,  [math]::Floor($msrPart.Size   / 1MB)) } else { 16  }
-        $recSizeMB = if ($recovPart) { [math]::Max(500, [math]::Floor($recovPart.Size / 1MB)) } else { 0   }
+        if ($efiPart)   { $efiSizeMB = [math]::Max(100, [math]::Floor($efiPart.Size   / 1MB)) } else { $efiSizeMB = 100 }
+        if ($msrPart)   { $msrSizeMB = [math]::Max(16,  [math]::Floor($msrPart.Size   / 1MB)) } else { $msrSizeMB = 16  }
+        if ($recovPart) { $recSizeMB = [math]::Max(500, [math]::Floor($recovPart.Size / 1MB)) } else { $recSizeMB = 0   }
         # Expand OS partition if destination is larger than source
         $extraMB   = [math]::Max(0, [math]::Floor(($dstDisk.Size - $srcDisk.Size) / 1MB))
         $osSizeMB  = [math]::Floor($osPart.Size / 1MB) + $extraMB
 
-        WLog ('Stil boot:          {0}' -f (if ($isUEFI) { 'UEFI (GPT)' } else { 'Legacy BIOS (MBR)' }))
-        WLog ('Partitie EFI:       {0}' -f (if ($efiPart)   { "#{0} {1}"  -f $efiPart.PartitionNumber,   (FmtHR $efiPart.Size)  } else { 'N/A' }))
-        WLog ('Partitie MSR:       {0}' -f (if ($msrPart)   { "#{0} {1}"  -f $msrPart.PartitionNumber,   (FmtHR $msrPart.Size)  } else { 'N/A' }))
+        WLog ('Stil boot:          {0}' -f $(if ($isUEFI) { 'UEFI (GPT)' } else { 'Legacy BIOS (MBR)' }))
+        WLog ('Partitie EFI:       {0}' -f $(if ($efiPart)   { "#{0} {1}"  -f $efiPart.PartitionNumber,   (FmtHR $efiPart.Size)  } else { 'N/A' }))
+        WLog ('Partitie MSR:       {0}' -f $(if ($msrPart)   { "#{0} {1}"  -f $msrPart.PartitionNumber,   (FmtHR $msrPart.Size)  } else { 'N/A' }))
         WLog ('Partitie OS:        #{0} {1}' -f $osPart.PartitionNumber, (FmtHR $osPart.Size))
-        WLog ('Partitie Recovery:  {0}' -f (if ($recovPart) { "#{0} {1}"  -f $recovPart.PartitionNumber, (FmtHR $recovPart.Size) } else { 'N/A' }))
+        WLog ('Partitie Recovery:  {0}' -f $(if ($recovPart) { "#{0} {1}"  -f $recovPart.PartitionNumber, (FmtHR $recovPart.Size) } else { 'N/A' }))
         WLog ('Marime OS pe target (cu spatiu extra): {0} MB' -f $osSizeMB)
         $sync.TotalBytes = $osPart.Size  # used for progress bar
 
@@ -507,7 +507,9 @@ $Script:MigrateWorkerScript = {
                 WLog "OS sursa → $srcTmpLetter`: (litera temporara)"
             }
         }
-        if (-not $srcOsLetter) { $srcOsLetter = if ($isDryRun) { 'C' } else { throw 'Nu am putut obtine litera pentru partitia OS sursa!' } }
+        if (-not $srcOsLetter) {
+            if ($isDryRun) { $srcOsLetter = 'C' } else { throw 'Nu am putut obtine litera pentru partitia OS sursa!' }
+        }
 
         WLog "OS sursa: $srcOsLetter`:  |  OS destinatie: $tmpOsLetter`:"
 
