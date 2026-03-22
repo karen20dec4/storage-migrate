@@ -316,21 +316,28 @@ $Script:MigrateWorkerScript = {
         if ($b -ge 1MB) { return ('{0:F0} MB' -f ($b/1MB)) }
         return ('{0} KB' -f [math]::Round($b/1KB))
     }
-    function Invoke-Proc ([string]$exe, [string[]]$args, [switch]$AllowNonZero) {
-        $cmdStr = "$exe $($args -join ' ')"
+    function Invoke-Proc ([string]$exe, [string[]]$ArgumentList, [switch]$AllowNonZero) {
+        # Quote any argument that contains whitespace so ProcessStartInfo.Arguments is valid
+        $quotedArgs = $ArgumentList | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }
+        $cmdStr = "$exe $($quotedArgs -join ' ')"
         WLog "Rulez: $cmdStr"
         if ($isDryRun) { WLog "[DRY-RUN] Nu se executa: $cmdStr" 'DRYRUN'; return 0 }
         $psi                        = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName               = $exe
-        $psi.Arguments              = $args -join ' '
+        $psi.Arguments              = $quotedArgs -join ' '
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError  = $true
+        $psi.RedirectStandardInput  = $true   # prevent interactive stdin hangs
         $psi.UseShellExecute        = $false
         $psi.CreateNoWindow         = $true
         $p = [System.Diagnostics.Process]::Start($psi)
-        $out = $p.StandardOutput.ReadToEnd()
-        $err = $p.StandardError.ReadToEnd()
+        $p.StandardInput.Close()              # close stdin immediately so no tool waits for input
+        # Read stdout and stderr concurrently to prevent pipe-buffer deadlock
+        $outTask = $p.StandardOutput.ReadToEndAsync()
+        $errTask = $p.StandardError.ReadToEndAsync()
         $p.WaitForExit()
+        $out = $outTask.Result
+        $err = $errTask.Result
         foreach ($l in ($out -split "`n")) { if ($l.Trim()) { WLog $l.Trim() } }
         foreach ($l in ($err -split "`n")) { if ($l.Trim()) { WLog $l.Trim() 'WARN' } }
         if (-not $AllowNonZero -and $p.ExitCode -ne 0) {
