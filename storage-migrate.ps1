@@ -29,7 +29,7 @@
 
 .NOTES
     Author  : karen20ced4 + Copilot
-    Version : 1.1
+    Version : 1.2
     Date    : 2026-03-21
     Repo    : https://github.com/karen20ced4/NVME-Migrate
     Requires: Windows 10 / Windows 11 / Windows Server 2019+
@@ -48,8 +48,8 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 0 — Version & paths
 # ─────────────────────────────────────────────────────────────────────────────
-$Script:AppVersion = '1.1'
-$Script:AppDate    = '2026-03-21'
+$Script:AppVersion = '1.2'
+$Script:AppDate    = '2026-03-22'
 # Use ProgramData so the path is consistent when script is run elevated
 # (elevation can change $env:USERPROFILE to the built-in Administrator profile)
 $Script:LogDir     = Join-Path $env:ProgramData 'storage-migrate-backups'
@@ -674,6 +674,7 @@ $grpMode              = New-Object System.Windows.Forms.GroupBox
 $grpMode.Text         = 'Mod Operare'
 $grpMode.Location     = New-Object System.Drawing.Point(10, 86)
 $grpMode.Size         = New-Object System.Drawing.Size(1024, 80)
+$grpMode.Anchor       = 'Top,Left,Right'
 # Font +25%: 9 Bold → 11 Bold
 $grpMode.Font         = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
 
@@ -703,6 +704,7 @@ $grpDisks             = New-Object System.Windows.Forms.GroupBox
 $grpDisks.Text        = 'Selectare discuri'
 $grpDisks.Location    = New-Object System.Drawing.Point(10, 174)
 $grpDisks.Size        = New-Object System.Drawing.Size(1024, 84)
+$grpDisks.Anchor      = 'Top,Left,Right'
 
 # Source
 $lblSrc               = New-Object System.Windows.Forms.Label
@@ -745,6 +747,17 @@ $btnRefresh.ForeColor = [System.Drawing.Color]::White
 $btnRefresh.FlatAppearance.BorderSize = 0
 
 $grpDisks.Controls.AddRange(@($lblSrc, $cmbSource, $lblDst, $cmbTarget, $btnRefresh))
+# Responsive layout: recalculate disk-selector control widths/positions when group box resizes
+$grpDisks.Add_SizeChanged({
+    $cw = $grpDisks.ClientSize.Width
+    if ($cw -lt 300) { return }
+    $midX              = [int]($cw / 2)
+    $cmbSource.Width   = $midX - $cmbSource.Left - 8
+    $lblDst.Left       = $midX
+    $cmbTarget.Left    = $midX + $lblDst.Width + 4
+    $btnRefresh.Left   = $cw - $btnRefresh.Width - 8
+    $cmbTarget.Width   = $btnRefresh.Left - $cmbTarget.Left - 8
+})
 $form.Controls.Add($grpDisks)
 #endregion
 
@@ -753,6 +766,7 @@ $grpInfo              = New-Object System.Windows.Forms.GroupBox
 $grpInfo.Text         = 'Partitii disc sursa (stanga)  vs  disc tinta (dreapta)'
 $grpInfo.Location     = New-Object System.Drawing.Point(10, 266)
 $grpInfo.Size         = New-Object System.Drawing.Size(1024, 196)
+$grpInfo.Anchor       = 'Top,Left,Right'
 
 function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
     $g                             = New-Object System.Windows.Forms.DataGridView
@@ -783,9 +797,19 @@ function New-InfoGrid ([int]$x, [System.Drawing.Color]$headerColor) {
 }
 
 $dgvSrc = New-InfoGrid 2   ([System.Drawing.Color]::FromArgb(0, 112, 184))
-$dgvDst = New-InfoGrid 513 ([System.Drawing.Color]::FromArgb(40, 140, 60))
+# Destination header changed from green to red per user request
+$dgvDst = New-InfoGrid 513 ([System.Drawing.Color]::FromArgb(192, 0, 0))
 
 $grpInfo.Controls.AddRange(@($dgvSrc, $dgvDst))
+# Responsive layout: keep both grids at equal half-width as group box resizes
+$grpInfo.Add_SizeChanged({
+    $cw = $grpInfo.ClientSize.Width
+    if ($cw -lt 100) { return }
+    $gw = [int](($cw - 12) / 2)   # 2px left margin + 8px gap + 2px right margin
+    $dgvSrc.Width = $gw
+    $dgvDst.Left  = $gw + 10
+    $dgvDst.Width = $gw
+})
 $form.Controls.Add($grpInfo)
 #endregion
 
@@ -794,6 +818,7 @@ $grpProgress          = New-Object System.Windows.Forms.GroupBox
 $grpProgress.Text     = 'Progres transfer'
 $grpProgress.Location = New-Object System.Drawing.Point(10, 470)
 $grpProgress.Size     = New-Object System.Drawing.Size(1024, 148)
+$grpProgress.Anchor   = 'Top,Left,Right'
 
 $progressBar          = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Location = New-Object System.Drawing.Point(8, 26)
@@ -801,6 +826,7 @@ $progressBar.Size     = New-Object System.Drawing.Size(1004, 32)
 $progressBar.Minimum  = 0
 $progressBar.Maximum  = 100
 $progressBar.Style    = 'Continuous'
+$progressBar.Anchor   = 'Top,Left,Right'
 
 # Stat labels row — Y increased to accommodate taller progress bar
 # Font +25%: 9 Bold → 11 Bold for lblPct; others inherit form font (11)
@@ -810,18 +836,21 @@ $lblPct.Location      = New-Object System.Drawing.Point(8, 70)
 $lblPct.Size          = New-Object System.Drawing.Size(64, 28)
 $lblPct.Font          = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
 $lblPct.ForeColor     = [System.Drawing.Color]::FromArgb(0, 78, 152)
+$lblPct.Anchor        = 'Top,Left'
 
 $lblSpeed             = New-Object System.Windows.Forms.Label
 $lblSpeed.Text        = 'Viteza: —'
 $lblSpeed.Location    = New-Object System.Drawing.Point(80, 70)
 $lblSpeed.Size        = New-Object System.Drawing.Size(180, 28)
 $lblSpeed.ForeColor   = [System.Drawing.Color]::DimGray
+$lblSpeed.Anchor      = 'Top,Left'
 
 $lblDone              = New-Object System.Windows.Forms.Label
 $lblDone.Text         = 'Copiat: —'
 $lblDone.Location     = New-Object System.Drawing.Point(268, 70)
 $lblDone.Size         = New-Object System.Drawing.Size(220, 28)
 $lblDone.ForeColor    = [System.Drawing.Color]::DimGray
+$lblDone.Anchor       = 'Top,Left'
 
 $lblElapsed           = New-Object System.Windows.Forms.Label
 # Stopwatch icon (U+23F1) removed — shows as [] without emoji font
@@ -829,6 +858,7 @@ $lblElapsed.Text      = 'Timp scurs:   --:--:--'
 $lblElapsed.Location  = New-Object System.Drawing.Point(496, 70)
 $lblElapsed.Size      = New-Object System.Drawing.Size(232, 28)
 $lblElapsed.ForeColor = [System.Drawing.Color]::DimGray
+$lblElapsed.Anchor    = 'Top,Right'
 
 $lblEta               = New-Object System.Windows.Forms.Label
 # Hourglass icon (U+23F3) removed — shows as [] without emoji font
@@ -836,6 +866,7 @@ $lblEta.Text          = 'Timp ramas:   --:--:--'
 $lblEta.Location      = New-Object System.Drawing.Point(736, 70)
 $lblEta.Size          = New-Object System.Drawing.Size(232, 28)
 $lblEta.ForeColor     = [System.Drawing.Color]::DimGray
+$lblEta.Anchor        = 'Top,Right'
 
 # Step name / status label
 $lblStep              = New-Object System.Windows.Forms.Label
@@ -845,6 +876,7 @@ $lblStep.Size         = New-Object System.Drawing.Size(1004, 30)
 $lblStep.ForeColor    = [System.Drawing.Color]::FromArgb(40, 80, 160)
 # Font +25%: 8.5 Italic → 10.5 Italic
 $lblStep.Font         = New-Object System.Drawing.Font('Segoe UI', 10.5, [System.Drawing.FontStyle]::Italic)
+$lblStep.Anchor       = 'Top,Left,Right'
 
 $grpProgress.Controls.AddRange(@($progressBar, $lblPct, $lblSpeed, $lblDone, $lblElapsed, $lblEta, $lblStep))
 $form.Controls.Add($grpProgress)
@@ -875,9 +907,8 @@ $form.Controls.Add($grpLog)
 
 #region ── Button panel ───────────────────────────────────────────────────────
 $pnlButtons           = New-Object System.Windows.Forms.Panel
-# Positioned so buttons are fully visible (form ~928px client area minus status strip ~24px = 904px)
 $pnlButtons.Location  = New-Object System.Drawing.Point(10, 874)
-$pnlButtons.Size      = New-Object System.Drawing.Size(1000, 56)
+$pnlButtons.Size      = New-Object System.Drawing.Size(1044, 56)
 $pnlButtons.Anchor    = 'Bottom,Left,Right'
 
 $chkDryRun            = New-Object System.Windows.Forms.CheckBox
@@ -887,25 +918,29 @@ $chkDryRun.Location   = New-Object System.Drawing.Point(0, 15)
 $chkDryRun.AutoSize   = $true
 # Font +25%: 9 → 11
 $chkDryRun.Font       = New-Object System.Drawing.Font('Segoe UI', 11)
+$chkDryRun.Anchor     = 'Top,Left'
 
 # ▶ (U+25B6) is in standard Segoe UI — safe to keep
+# Start button: changed from blue to GREEN per user request
 $btnStart             = New-Object System.Windows.Forms.Button
 $btnStart.Text        = '▶  Pornire'
-$btnStart.Location    = New-Object System.Drawing.Point(650, 8)
+$btnStart.Location    = New-Object System.Drawing.Point(570, 8)
 $btnStart.Size        = New-Object System.Drawing.Size(152, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnStart.Font        = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
-$btnStart.BackColor   = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$btnStart.BackColor   = [System.Drawing.Color]::FromArgb(0, 153, 76)
 $btnStart.ForeColor   = [System.Drawing.Color]::White
 $btnStart.FlatStyle   = 'Flat'
 $btnStart.FlatAppearance.BorderSize = 0
 $btnStart.Cursor      = [System.Windows.Forms.Cursors]::Hand
+$btnStart.Anchor      = 'Top,Right'
 
 # ✕ (U+2715) is in standard Segoe UI — safe to keep
+# Cancel button: stays RED
 $btnCancel            = New-Object System.Windows.Forms.Button
 $btnCancel.Text       = '✕  Anulare'
-$btnCancel.Location   = New-Object System.Drawing.Point(820, 8)
-$btnCancel.Size       = New-Object System.Drawing.Size(160, 42)
+$btnCancel.Location   = New-Object System.Drawing.Point(730, 8)
+$btnCancel.Size       = New-Object System.Drawing.Size(152, 42)
 # Font +25%: 10 Bold → 12.5 Bold
 $btnCancel.Font       = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
 $btnCancel.BackColor  = [System.Drawing.Color]::FromArgb(196, 43, 28)
@@ -914,8 +949,22 @@ $btnCancel.FlatStyle  = 'Flat'
 $btnCancel.FlatAppearance.BorderSize = 0
 $btnCancel.Enabled    = $false
 $btnCancel.Cursor     = [System.Windows.Forms.Cursors]::Hand
+$btnCancel.Anchor     = 'Top,Right'
 
-$pnlButtons.Controls.AddRange(@($chkDryRun, $btnStart, $btnCancel))
+# Exit button: BLUE — closes the application
+$btnExit              = New-Object System.Windows.Forms.Button
+$btnExit.Text         = 'Exit'
+$btnExit.Location     = New-Object System.Drawing.Point(890, 8)
+$btnExit.Size         = New-Object System.Drawing.Size(152, 42)
+$btnExit.Font         = New-Object System.Drawing.Font('Segoe UI', 12.5, [System.Drawing.FontStyle]::Bold)
+$btnExit.BackColor    = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$btnExit.ForeColor    = [System.Drawing.Color]::White
+$btnExit.FlatStyle    = 'Flat'
+$btnExit.FlatAppearance.BorderSize = 0
+$btnExit.Cursor       = [System.Windows.Forms.Cursors]::Hand
+$btnExit.Anchor       = 'Top,Right'
+
+$pnlButtons.Controls.AddRange(@($chkDryRun, $btnStart, $btnCancel, $btnExit))
 $form.Controls.Add($pnlButtons)
 #endregion
 
@@ -969,6 +1018,9 @@ function Invoke-RefreshDisks {
 }
 
 function Invoke-UpdateGrids {
+    $srcDiskInfo = ''
+    $dstDiskInfo = ''
+
     # Grila Sursă
     $dgvSrc.Rows.Clear(); $dgvSrc.Columns.Clear()
     # Folosim .Length in loc de .Count pentru siguranta in StrictMode
@@ -982,7 +1034,7 @@ function Invoke-UpdateGrids {
                 [void]$dgvSrc.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
             }
         }
-        $grpInfo.Text = "Partitii:  Disk $($sd.Index)  $($sd.Model)"
+        $srcDiskInfo = "Sursa: Disk $($sd.Index)  $($sd.Model)"
     }
 
     # Grila Destinație
@@ -997,6 +1049,14 @@ function Invoke-UpdateGrids {
                 [void]$dgvDst.Rows.Add(($r.PSObject.Properties.Name | ForEach-Object { $r.$_ }))
             }
         }
+        $dstDiskInfo = "Tinta: Disk $($td.Index)  $($td.Model)"
+    }
+
+    # Update group title to show both source and destination disk info
+    if ($srcDiskInfo -or $dstDiskInfo) {
+        $grpInfo.Text = "Partitii  |  $srcDiskInfo   |   $dstDiskInfo"
+    } else {
+        $grpInfo.Text = 'Partitii disc sursa (stanga)  vs  disc tinta (dreapta)'
     }
 }
 
@@ -1150,6 +1210,10 @@ $btnCancel.Add_Click({
     $lblStep.Text      = 'Anulare în curs...'
 })
 
+$btnExit.Add_Click({
+    $form.Close()
+})
+
 $btnStart.Add_Click({
     # ── Validate selections ──
     if ($cmbSource.SelectedIndex -lt 0 -or $cmbTarget.SelectedIndex -lt 0) {
@@ -1277,6 +1341,28 @@ $form.Add_FormClosing({
     $guiTimer.Stop()
     if ($Script:WorkerPS) { try { $Script:WorkerPS.Dispose() } catch {} }
     if ($Script:WorkerRS) { try { $Script:WorkerRS.Close(); $Script:WorkerRS.Dispose() } catch {} }
+})
+
+# Force initial responsive layout on first show (SizeChanged only fires on subsequent resizes)
+$form.Add_Shown({
+    # Trigger grpDisks layout helper
+    $cw = $grpDisks.ClientSize.Width
+    if ($cw -gt 300) {
+        $midX = [int]($cw / 2)
+        $cmbSource.Width = $midX - $cmbSource.Left - 8
+        $lblDst.Left     = $midX
+        $cmbTarget.Left  = $midX + $lblDst.Width + 4
+        $btnRefresh.Left = $cw - $btnRefresh.Width - 8
+        $cmbTarget.Width = $btnRefresh.Left - $cmbTarget.Left - 8
+    }
+    # Trigger grpInfo grid layout helper
+    $cw2 = $grpInfo.ClientSize.Width
+    if ($cw2 -gt 100) {
+        $gw = [int](($cw2 - 12) / 2)
+        $dgvSrc.Width = $gw
+        $dgvDst.Left  = $gw + 10
+        $dgvDst.Width = $gw
+    }
 })
 
 # ─────────────────────────────────────────────────────────────────────────────
