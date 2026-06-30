@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
-# storage-post-migration.sh v2.6 - hh:mm:ss time display in step table
-# Date: 2026-03-21
+# post-migration.sh v2.2 - Added LVM auto-extend
 # - Summary-mode by default (concise console output)
 # - Verbose mode streams command output (useful for debugging)
 # - All detailed output is logged to LOG (default /root/storage-migrate-backups/post-migration.log)
-# - Graceful handling when initramfs/grub tools are absent (e.g. after data-clone)
 #
 # Usage:
-#   ./storage-post-migration.sh                 # summary (concise, incremental step rows)
-#   ./storage-post-migration.sh --verbose       # verbose (stream command output)
-#   ./storage-post-migration.sh --quiet         # very quiet (only fatal errors)
-#   ./storage-post-migration.sh --extend-lvm auto # auto-extend LVM
-#
-# NOTE FOR AI: Increment version by +0.1 and update the Date comment each time this file is modified.
+#   ./post-migration.sh                 # summary (concise, incremental step rows)
+#   ./post-migration.sh --verbose       # verbose (stream command output)
+#   ./post-migration.sh --quiet         # very quiet (only fatal errors)
+#   ./post-migration.sh --extend-lvm auto # auto-extend LVM
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.6"
+SCRIPT_VERSION="2.2"
 ROOT="/"
 MODE="preboot"
 FIX_RESUME="auto"
@@ -34,7 +30,15 @@ COLOR=true
 ce() { echo "$@" >&2; }
 require_root() { [ "$(id -u)" -eq 0 ] || { ce "This script must run as root."; exit 1; } }
 path_in_root() { echo "${ROOT%/}$1"; }
-read_arg() { local key="$1"; shift || true; if [ $# -gt 0 ]; then printf "%s" "$1"; else ce "Missing value for ${key}"; exit 1; fi }
+read_arg() {
+  local key="$1"
+  local value="${2-}"
+  if [ -z "${value}" ] || [[ "${value}" == --* ]]; then
+    ce "Missing value for ${key}"
+    exit 1
+  fi
+  printf "%s" "${value}"
+}
 
 # Color setup
 _red() { [ "$COLOR" = true ] && printf '\033[0;31m%s\033[0m' "$1" || printf '%s' "$1"; }
@@ -75,9 +79,9 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-storage-post-migration.sh v2.6
+post-migration.sh v2.2
 Usage:
-  ./storage-post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
+  ./post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:
   --postboot            run additional checks for a live system (post-boot audit)
   --verbose             stream detailed output to console + log
@@ -104,18 +108,12 @@ mkdir -p "$(dirname "${LOG}")"
 touch "${LOG}" || { ce "Cannot write log: ${LOG}"; exit 1; }
 
 _now() { date '+%Y-%m-%d %H:%M:%S'; }
-_ts()  { date '+%s'; }
-# Convert seconds to hh:mm:ss display string
-_hms() {
-  local s="${1:-0}"
-  [[ "${s}" =~ ^[0-9]+$ ]] || s=0
-  printf "%02d:%02d:%02d" $((s/3600)) $(((s%3600)/60)) $((s%60))
-}
+_ts() { date '+%s'; }
 
 # Logging primitives
 _log_write() { local ts; ts=$(_now); echo "[$ts] $*" >> "${LOG}"; }
 log_summary() { _log_write "$@"; if [ "${VERBOSITY}" = "summary" ] || [ "${VERBOSITY}" = "verbose" ]; then echo "[$(_now)] $*"; fi; }
-log_info() { _log_write "$@"; if [ "${VERBOSITY}" = "verbose" ]; then echo "[$(_now)] $*" ; fi; }
+log_info() { _log_write "$@"; if [ "${VERBOSITY}" = "verbose" ]; then echo "[$(_now)] $*"; fi; }
 log_error() { _log_write "ERROR: $*"; echo "[$(_now)] ${_red "ERROR:"} $*" >&2; }
 
 # run_cmd: behavior depends on VERBOSITY
@@ -127,7 +125,7 @@ run_cmd() {
     if [ "${rc}" -ne 0 ]; then
       log_error "Command failed (rc=${rc}): $*"
       return "${rc}"
-    fi 
+    fi
   else
     _log_write "+ $*"
     if "$@" >> "${LOG}" 2>&1; then
@@ -156,8 +154,8 @@ step_start() {
     if [ "${VERBOSITY}" != "quiet" ]; then
       echo ""
       echo "$(_blue '--- post-migration progress ---')"
-      printf "%-3s  %-40s  %-8s   %-8s\n" "#" "STEP" "STATUS" "DURATĂ"
-      echo "-----------------------------------------------------------------------"
+      printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
+      echo "---------------------------------------------------------------------"
     fi
   fi
 }
@@ -178,7 +176,7 @@ step_print_row() {
     status_str="$(_yellow "${status}")"
   fi
   if [ "${VERBOSITY}" != "quiet" ]; then
-    printf "%-3s  %-40s  %-8s   %-8s\n" "${num}" "${name:0:40}" "${status_str}" "$(_hms "${dur}")"
+    printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
   fi
 }
 
@@ -203,19 +201,21 @@ step_fail() {
 }
 
 # target-root helpers (prefers chroot when root != /)
-_chroot() { chroot "${ROOT%/}" "$@" || "$@"; }
+# FIX (P1): NU mai face fallback la host când comanda întoarce non-zero (re-executa
+# pe host cu context greșit). Folosește chroot doar când ROOT != / și directorul există.
+_chroot() {
+  local target="${ROOT%/}"
+  if [ -z "${target}" ] || [ ! -d "${target}" ]; then
+    "$@"
+  else
+    chroot "${target}" "$@"
+  fi
+}
 blkid_in_root() { _chroot blkid "$@" 2>/dev/null || true; }
 swapon_show_in_root() { _chroot swapon --show 2>/dev/null || true; }
-# Corectam helper-ele LVM sa nu foloseasca chroot daca ROOT=/
-vgs_in_root() {
-  if [ "${ROOT}" = "/" ]; then vgs "$@" 2>/dev/null || true; else _chroot vgs "$@" 2>/dev/null || true; fi
-}
-lvs_in_root() {
-  if [ "${ROOT}" = "/" ]; then lvs "$@" 2>/dev/null || true; else _chroot lvs "$@" 2>/dev/null || true; fi
-}
-findmnt_in_root() {
-  if [ "${ROOT}" = "/" ]; then findmnt "$@" 2>/dev/null || true; else _chroot findmnt "$@" 2>/dev/null || true; fi
-}
+findmnt_in_root() { _chroot findmnt "$@" 2>/dev/null || true; }
+vgs_in_root() { _chroot vgs "$@" 2>/dev/null || true; }
+lvs_in_root() { _chroot lvs "$@" 2>/dev/null || true; }
 
 get_swap_uuid_candidates() {
   local fstab; fstab="$(path_in_root /etc/fstab)"
@@ -247,7 +247,13 @@ fix_cdrom_fstab() {
     keep) _log_write "Keep CD-ROM as-is"; step_ok; return 0 ;;
     comment)
       if grep -qE '^[^#].*\s+/media/cdrom0\s+.*(iso9660|udf)' "${fstab}"; then
-        sed -i 's#^\([^#].*\s\+/media/cdrom0\s\+.*\)#\1  # commented by post-migration.sh#' "${fstab}" || true
+        awk '{
+          if ($0 !~ /^[[:space:]]*#/ && $2=="/media/cdrom0" && $3 ~ /(iso9660|udf)/) {
+            print "# disabled by post-migration.sh: " $0
+          } else {
+            print
+          }
+        }' "${fstab}" > "${fstab}.tmp" && mv "${fstab}.tmp" "${fstab}"
         _log_write "CD-ROM entry commented in fstab"
       fi
       step_ok; return 0 ;;
@@ -342,9 +348,10 @@ fix_resume_conf() {
 clean_grub_resume() {
   step_start "Clean GRUB resume"
   local grub_def; grub_def="$(path_in_root /etc/default/grub)"
-  # CORECTIE V7: Adaugat 'fi' lipsa
-  if [ ! -f "${grub_def}" ]; then _log_write "No /etc/default/grub (skipping)"; step_ok; return 0; fi 
-  sed -i 's/\(GRUB_CMDLINE_LINUX[^=]*="\)[^"]*\bresume=[^" ]* *\([^"]*"\)/\1\2/g' "${grub_def}" || true
+  if [ ! -f "${grub_def}" ]; then _log_write "No /etc/default/grub (skipping)"; step_ok; return 0; fi
+  # FIX (G2): regex care elimină DOAR token-ul resume=..., păstrând restul liniei
+  # (varianta veche înghițea tot ce era înaintea lui resume=, ex. 'quiet').
+  sed -i 's/\([[:space:]"]\)resume=[^"[:space:]]*/\1/g' "${grub_def}" || true
   case "${QUIET_BOOT}" in
     yes)
       if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "${grub_def}"; then
@@ -372,8 +379,7 @@ extend_lvm_volumes() {
   fi
 
   local vgs_with_free
-  # Folosim vg_free > 1024m pentru a include VGs cu cel putin 1G liber
-  vgs_with_free=$(vgs_in_root --noheadings --units m -o vg_name,vg_free --separator=',' --select 'vg_free > 1024' 2>/dev/null || true)
+  vgs_with_free=$(vgs_in_root --noheadings --units g -o vg_name,vfree --separator=',' --select 'vfree > 1' 2>/dev/null || true)
   
   if [ -z "${vgs_with_free}" ]; then
     _log_write "No VGs found with >1G free space."
@@ -382,63 +388,38 @@ extend_lvm_volumes() {
   
   _log_write "VGs with free space found: ${vgs_with_free}"
   
-  local vg_name vfree all_lv_paths mounted_lvs lv_path mountpoint fs_type extend_count=0 overall_ok=true
-  
+  local vg_name vfree lv_path mountpoint fs_type extend_count=0 overall_ok=true
+
   while IFS=',' read -r vg_name vfree; do
     [ -z "${vg_name}" ] && continue
-    # vfree vine acum in Megabytes (m), pentru prompt il convertim in G
-    local vfree_mb
-    vfree_mb=$(LC_ALL=C printf "%.0f" "${vfree}" 2>/dev/null || echo "0")
-    local vfree_gb=$((vfree_mb / 1024))
-    
-    # **LOGICA V6/V7: Nu folosim mountpoint din lvs, folosim findmnt pentru fiabilitate.**
+    vfree=$(echo "${vfree}" | tr -d '[:space:]' | sed 's/[gG]$//')
+    vfree=$(LC_ALL=C printf "%.0f" "${vfree}" 2>/dev/null || echo "0")
 
-    # 1. Obtinem toate LV path-urile din acest VG
-    # Folosim tr pentru a transforma output-ul intr-o lista de linii
-    all_lv_paths=$(lvs_in_root --noheadings -o lv_path --separator=',' --select "vg_name=${vg_name}" 2>/dev/null | tr ',' '\n' | grep -v '^\s*$' || true)
-    
-    # 2. Verificam care LV-uri sunt montate
-    mounted_lvs=""
-    for lv_path in ${all_lv_paths}; do
-      # Curatam spatiile albe (care apar in output-ul lvs)
-      lv_path=$(echo "${lv_path}" | tr -d '[:space:]')
-      [ -z "${lv_path}" ] && continue
-      
-      # Folosim findmnt pentru a verifica daca e montat si unde
-      mountpoint=$(findmnt_in_root -no TARGET "${lv_path}" 2>/dev/null || true)
-      
-      if [ -n "${mountpoint}" ]; then
-        # Am gasit un LV montat: adaugam in lista (path;mountpoint) - folosim ';' ca separator sigur
-        mounted_lvs+="${lv_path};${mountpoint}\n"
-      fi
-    done
-    
-    # Curatam spatiile goale si liniile noi
-    mounted_lvs=$(echo -e "${mounted_lvs}" | grep -v '^\s*$' || true)
-    
-    if [ -z "${mounted_lvs}" ]; then
-      _log_write "VG '${vg_name}' has free space, but no mounted LVs were found. Skipping automatic resize."
+    # FIX (P3/P4): `lvs` NU are câmpul `mountpoint` (Debian 12 / LVM 2.03), iar două
+    # `--select` se anulează reciproc. Listăm LV-urile din VG și determinăm
+    # mountpoint-ul cu `findmnt` pe lv_path. Acționăm doar dacă există EXACT un LV montat.
+    local -a mounted_lvs=()
+    local _lvp _mp
+    while IFS= read -r _lvp; do
+      _lvp=$(echo "${_lvp}" | xargs)
+      [ -z "${_lvp}" ] && continue
+      _mp=$(findmnt_in_root -nro TARGET "${_lvp}" 2>/dev/null | head -n1 || true)
+      [ -n "${_mp}" ] && mounted_lvs+=("${_lvp}|${_mp}")
+    done < <(lvs_in_root --noheadings -o lv_path --select "vg_name=${vg_name}" 2>/dev/null | awk 'NF{print $1}')
+
+    # FIX (P2): verificare corectă pe numărul de elemente (nu `wc -l` pe string gol)
+    if [ "${#mounted_lvs[@]}" -ne 1 ]; then
+      _log_write "VG '${vg_name}' has free space, but has ${#mounted_lvs[@]} mounted LV(s). Skipping automatic resize."
       continue
     fi
-    
-    # 3. Verificare de siguranta: trebuie sa fie un singur LV montat
-    if [ "$(echo -e "${mounted_lvs}" | wc -l)" -ne 1 ]; then
-      _log_write "VG '${vg_name}' has free space, but has multiple mounted LVs or the output is malformed. Skipping automatic resize for safety."
-      _log_write "Detected mounted LVs count: $(echo -e "${mounted_lvs}" | wc -l)"
-      continue
-    fi
-    
-    # 4. Procesam singurul LV montat gasit. Separatorul este ';'
-    IFS=';' read -r lv_path mountpoint <<< "${mounted_lvs}"
-    # Curatam spatiile albe
-    lv_path=$(echo "${lv_path}" | xargs)
-    mountpoint=$(echo "${mountpoint}" | xargs)
+
+    IFS='|' read -r lv_path mountpoint <<< "${mounted_lvs[0]}"
 
     local proceed=false
     if [ "${EXTEND_LVM}" = "auto" ]; then
       proceed=true
     elif [ "${EXTEND_LVM}" = "ask" ]; then
-      if _ask "Found ${vfree_gb}G (${vfree_mb}M) free in VG '${vg_name}'. Extend '${mountpoint}' (${lv_path}) to use it?"; then
+      if _ask "Found ${vfree}G free in VG '${vg_name}'. Extend '${mountpoint}' (${lv_path}) to use it?"; then
         proceed=true
       else
         _log_write "User skipped resize for '${mountpoint}'."
@@ -491,13 +472,6 @@ extend_lvm_volumes() {
 rebuild_boot_artifacts() {
   step_start "Rebuild initramfs & grub"
   local realroot; realroot="$(readlink -f "${ROOT}")"
-
-  # Guard: skip gracefully if initramfs tools are not present (e.g. after a data-clone)
-  if ! command -v update-initramfs >/dev/null 2>&1 && ! command -v mkinitrd >/dev/null 2>&1; then
-    _log_write "update-initramfs not found — skipping (not a Debian/Ubuntu system or data-clone target)"
-    step_ok; return 0
-  fi
-
   if [ "${realroot}" = "/" ]; then
     local kcur; kcur="$(uname -r)"
     if ! run_cmd /usr/sbin/update-initramfs -u -k "${kcur}" -v; then
@@ -507,8 +481,26 @@ rebuild_boot_artifacts() {
       step_fail; return 1
     fi
   else
-    if ! run_cmd chroot "${realroot}" update-initramfs -u -k all; then step_fail; return 1; fi
-    if ! run_cmd chroot "${realroot}" update-grub; then step_fail; return 1; fi
+    # FIX (PB1): update-grub/grub-probe au nevoie de /dev /proc /sys /run în chroot.
+    # Montăm doar ce lipsește și demontăm la final (chiar și la eroare).
+    local -a _bound=()
+    local fs rc=0
+    for fs in dev proc sys run; do
+      if ! mountpoint -q "${realroot}/${fs}" 2>/dev/null; then
+        if mount --bind "/${fs}" "${realroot}/${fs}" 2>/dev/null; then
+          _bound+=("${realroot}/${fs}")
+        else
+          _log_write "WARN: nu am putut monta --bind /${fs} în ${realroot}"
+        fi
+      fi
+    done
+    run_cmd chroot "${realroot}" update-initramfs -u -k all || rc=1
+    run_cmd chroot "${realroot}" update-grub || rc=1
+    local i
+    for (( i=${#_bound[@]}-1 ; i>=0 ; i-- )); do
+      umount "${_bound[i]}" 2>/dev/null || umount -l "${_bound[i]}" 2>/dev/null || true
+    done
+    if [ "${rc}" -ne 0 ]; then step_fail; return 1; fi
   fi
   _log_write "Boot artifacts updated"
   step_ok
@@ -561,8 +553,8 @@ echo ""
 echo ""
 echo ""
 echo $(_blue "========== post-migration summary ==========")
-printf "%-3s  %-40s  %-8s   %-8s\n" "#" "STEP" "STATUS" "DURATĂ"
-echo "-----------------------------------------------------------------------"
+printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
+echo "---------------------------------------------------------------------"
 for i in "${!STEPS_NAME[@]}"; do
   num=$((i+1))
   name="${STEPS_NAME[$i]}"
@@ -575,11 +567,11 @@ for i in "${!STEPS_NAME[@]}"; do
   else
     status_str="$(_yellow "${status}")"
   fi
-  printf "%-3s  %-40s  %-8s   %-8s\n" "${num}" "${name:0:40}" "${status_str}" "$(_hms "${dur}")"
+  printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
 done
 total_dur=$(( $(_ts) - main_start ))
-echo "-----------------------------------------------------------------------"
-echo "Total time: $(_hms "${total_dur}")"
+echo "---------------------------------------------------------------------"
+echo "Total time: ${total_dur}s"
 echo ""
 echo "Detailed log: ${LOG}"
 echo $(_blue "=============================================")
