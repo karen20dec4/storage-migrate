@@ -422,7 +422,9 @@ detect_vgs_on_disk() {
       if [[ "${pv}" =~ ^${disk}(p[0-9]+|[0-9]+)$ ]]; then
         local vg
         vg=$(pvs --noheadings -o vg_name "${pv}" 2>/dev/null | xargs || echo "")
-        if [ -n "${vg}" ] && [[ ! " ${found_vgs[*]} " =~ " ${vg} " ]]; then
+        # FIX: IFS global e $'\n\t', deci ${found_vgs[*]} se unește cu \n (nu spațiu);
+        # testul de apartenență trebuie făcut cu IFS=' ' (altfel apar VG-uri duplicate).
+        if [ -n "${vg}" ] && ! ( IFS=' '; [[ " ${found_vgs[*]:-} " == *" ${vg} "* ]] ); then
           found_vgs+=("${vg}")
         fi
       fi
@@ -558,7 +560,8 @@ show_disk_list() {
         if [[ "${pvline}" =~ ^${disk}(p[0-9]+|[0-9]+)$ ]]; then
           pv_count=$((pv_count + 1))
           vg=$(pvs --noheadings -o vg_name "${pvline}" 2>/dev/null | xargs || true)
-          if [ -n "${vg}" ] && [[ ! " ${found_vgs[*]} " =~ " ${vg} " ]]; then
+          # FIX: vezi nota din detect_vgs_on_disk - join cu IFS=' ' pentru dedup corect.
+          if [ -n "${vg}" ] && ! ( IFS=' '; [[ " ${found_vgs[*]:-} " == *" ${vg} "* ]] ); then
             found_vgs+=("${vg}")
           fi
         fi
@@ -816,9 +819,14 @@ show_dry_run_root() {
   fi
 
   local rsync_excludes=(--partial --info=progress2 --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile)
-  if findmnt -no TARGET /home >/dev/null 2>&1; then
-    rsync_excludes+=(--exclude=/home/*)
-  fi
+  # Reflectă în dry-run aceleași excluderi ca migrarea reală: orice mountpoint separat.
+  local _mp _src
+  while IFS=' ' read -r _mp _src; do
+    [ -z "${_mp}" ] && continue
+    [ "${_mp}" = "/" ] && continue
+    case "${_src}" in /dev/*) ;; *) continue ;; esac
+    rsync_excludes+=(--exclude="${_mp}/*")
+  done < <(findmnt -rno TARGET,SOURCE 2>/dev/null)
   log_command rsync -aAXH "${rsync_excludes[@]}" / /mnt/newroot || true
   log_command cp /etc/default/grub /mnt/newroot/etc/default/grub || true
   if [ "${BOOT_MODE}" = "UEFI" ]; then
@@ -1037,12 +1045,18 @@ migrate_root_disk() {
   mkdir -p /mnt/newroot/{dev,proc,sys,run,boot,tmp}
 
   local rsync_excludes_list=(--exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile)
-  if findmnt -no TARGET /home >/dev/null 2>&1; then
-    print_info "/home este un mountpoint separat, va fi exclus din rsync."
-    rsync_excludes_list+=(--exclude=/home/*)
-  else
-    print_info "/home este pe partiția root, va fi sincronizat."
-  fi
+  # FIX: exclude din rsync ORICE filesystem montat separat sub / (pe alt disc/partiție):
+  # /data, /home, /boot, /boot/efi etc. Datele lor stau pe partițiile proprii și NU trebuie
+  # copiate în noul root (l-ar umfla sau depăși). Directorul punct-de-montare rămâne gol,
+  # iar fstab-ul le remontează după boot. (Versiunea veche excludea doar /home.)
+  local _mp _src
+  while IFS=' ' read -r _mp _src; do
+    [ -z "${_mp}" ] && continue
+    [ "${_mp}" = "/" ] && continue
+    case "${_src}" in /dev/*) ;; *) continue ;; esac
+    rsync_excludes_list+=(--exclude="${_mp}/*")
+    print_info "Mountpoint separat exclus din rsync: ${_mp} (rămâne pe ${_src})"
+  done < <(findmnt -rno TARGET,SOURCE 2>/dev/null)
 
     local rsync_exit=0
     if log_interactive_command rsync -aAXH --partial --info=progress2 "${rsync_excludes_list[@]}" / /mnt/newroot; then

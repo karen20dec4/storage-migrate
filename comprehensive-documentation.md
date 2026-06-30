@@ -131,7 +131,7 @@ For `root-only` and `full-disk`, the script:
 5. Runs `partprobe` and waits for device nodes.
 6. Formats root, swap, and ESP where applicable.
 7. Mounts the new root at `/mnt/newroot`.
-8. Runs `rsync -aAXH` from `/` to the new root, excluding pseudo-filesystems and separate `/home`.
+8. Runs `rsync -aAXH` from `/` to the new root, excluding pseudo-filesystems and **every separately-mounted block-device filesystem** (e.g. `/home`, `/data`, `/boot/efi`). Their data stays on its own partition/disk; only the empty mountpoint directory is recreated and `fstab` remounts it after boot.
 9. Bind-mounts `/dev`, `/proc`, `/sys`, `/run`, and optionally `/dev/pts`.
 10. Copies and sanitizes `/etc/default/grub`.
 11. Installs GRUB in UEFI or BIOS mode.
@@ -210,6 +210,32 @@ The audit identified and repaired the following concrete issues:
 
 10. Tab indentation was removed from scripts after patching.
     - This improves readability and keeps style closer to the contributor guide.
+
+### Second audit (2026-06-30)
+
+A follow-up review (validated with `bash -n` and ShellCheck 0.10) found and fixed:
+
+1. **`log_error` was fatally broken (`storage-post-migration.sh`).** It used
+   `${_red "ERROR:"}` (parameter-expansion braces) instead of `$(_red "ERROR:")`
+   (command substitution). Under `set -euo pipefail` this raises a *bad substitution*
+   error, so the error-reporting function itself aborted the script and the real
+   message was lost — exactly when something had already gone wrong. Now uses `$(...)`.
+
+2. **rsync copied every separately-mounted filesystem, not just `/home`
+   (`storage-migrate.sh`).** Because `rsync -aAXH` runs without `-x`, any extra mount
+   under `/` (e.g. a separate `/data` disk) was descended into and copied into the new
+   root, risking a bloated or overflowing target. Replaced the `/home`-only special case
+   with a loop that excludes **all** block-device mountpoints under `/` (detected via
+   `findmnt -rno TARGET,SOURCE`). Applied identically to the dry-run preview so the
+   plan matches the real run.
+
+3. **VG de-duplication failed with 2+ VGs (`storage-migrate.sh`).** Because the global
+   `IFS=$'\n\t'`, `${found_vgs[*]}` joined with a newline, so the space-delimited
+   membership test never matched and VG names could be listed more than once. The test
+   now joins with `IFS=' '` in a subshell (cosmetic, but correct).
+
+4. **Minor hardening:** quoted `${2-}` in `storage-post-migration.sh` argument parsing
+   (consistency with the main script) and quoted two unquoted summary `echo $(…)` lines.
 
 ## 6. Important Implementation Details
 

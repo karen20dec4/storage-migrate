@@ -63,16 +63,16 @@ _ask() {
 # Parse args
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root) ROOT="$(read_arg "$1" ${2-})"; shift ;;
+    --root) ROOT="$(read_arg "$1" "${2-}")"; shift ;;
     --preboot) MODE="preboot" ;;
     --postboot) MODE="postboot" ;;
-    --fix-resume) FIX_RESUME="$(read_arg "$1" ${2-})"; shift ;;
-    --fix-cdrom) FIX_CDROM="$(read_arg "$1" ${2-})"; shift ;;
-    --blacklist-floppy) BLACKLIST_FLOPPY="$(read_arg "$1" ${2-})"; shift ;;
-    --quiet-boot) QUIET_BOOT="$(read_arg "$1" ${2-})"; shift ;;
-    --sync-fstab-swap) SYNC_FSTAB_SWAP="$(read_arg "$1" ${2-})"; shift ;;
-    --extend-lvm) EXTEND_LVM="$(read_arg "$1" ${2-})"; shift ;;
-    --log) LOG_REL="$(read_arg "$1" ${2-})"; shift ;;
+    --fix-resume) FIX_RESUME="$(read_arg "$1" "${2-}")"; shift ;;
+    --fix-cdrom) FIX_CDROM="$(read_arg "$1" "${2-}")"; shift ;;
+    --blacklist-floppy) BLACKLIST_FLOPPY="$(read_arg "$1" "${2-}")"; shift ;;
+    --quiet-boot) QUIET_BOOT="$(read_arg "$1" "${2-}")"; shift ;;
+    --sync-fstab-swap) SYNC_FSTAB_SWAP="$(read_arg "$1" "${2-}")"; shift ;;
+    --extend-lvm) EXTEND_LVM="$(read_arg "$1" "${2-}")"; shift ;;
+    --log) LOG_REL="$(read_arg "$1" "${2-}")"; shift ;;
     --verbose) VERBOSITY="verbose" ;;
     --summary) VERBOSITY="summary" ;;
     --quiet) VERBOSITY="quiet" ;;
@@ -114,7 +114,7 @@ _ts() { date '+%s'; }
 _log_write() { local ts; ts=$(_now); echo "[$ts] $*" >> "${LOG}"; }
 log_summary() { _log_write "$@"; if [ "${VERBOSITY}" = "summary" ] || [ "${VERBOSITY}" = "verbose" ]; then echo "[$(_now)] $*"; fi; }
 log_info() { _log_write "$@"; if [ "${VERBOSITY}" = "verbose" ]; then echo "[$(_now)] $*"; fi; }
-log_error() { _log_write "ERROR: $*"; echo "[$(_now)] ${_red "ERROR:"} $*" >&2; }
+log_error() { _log_write "ERROR: $*"; echo "[$(_now)] $(_red "ERROR:") $*" >&2; }
 
 # run_cmd: behavior depends on VERBOSITY
 run_cmd() {
@@ -552,7 +552,7 @@ echo ""
 echo ""
 echo ""
 echo ""
-echo $(_blue "========== post-migration summary ==========")
+echo "$(_blue "========== post-migration summary ==========")"
 printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
 echo "---------------------------------------------------------------------"
 for i in "${!STEPS_NAME[@]}"; do
@@ -574,7 +574,7 @@ echo "---------------------------------------------------------------------"
 echo "Total time: ${total_dur}s"
 echo ""
 echo "Detailed log: ${LOG}"
-echo $(_blue "=============================================")
+echo "$(_blue "=============================================")"
 
 _log_write "=== post-migration.sh done (total ${total_dur}s) ==="
 
