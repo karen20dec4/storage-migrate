@@ -10,6 +10,7 @@ The project is intentionally small:
 
 - `storage-migrate.sh`: the main migration script.
 - `storage-post-migration.sh`: a post-migration repair, cleanup, and audit helper.
+- `storage-migrate.ps1`: Windows counterpart (WinForms GUI) — OS migration via diskpart + robocopy + bcdboot, or raw sector-by-sector disk clone. See section 10.
 - `AGENTS.md`: contributor guidance.
 - `comprehensive-documentation.md`: this technical explanation and audit summary.
 
@@ -400,7 +401,53 @@ Debian 12 root-on-LVM, lvm-only migration path
 - Network-dependent package installation inside chroot may fail if the target system has no network or broken APT configuration.
 - Filesystems other than ext-family and xfs have limited automatic resize support in post-migration.
 
-## 10. Operational Safety Checklist
+## 10. Windows Tool: `storage-migrate.ps1` (v1.3)
+
+WinForms GUI for Windows 10/11 / Server 2019+ (PowerShell 5.1+), auto-elevating.
+Two modes: **Migrare OS** (diskpart partition layout EFI/MSR/OS/Recovery + robocopy
+`/B /COPYALL` + bcdboot) and **Clonare disc** (raw sector-by-sector, dd-equivalent).
+Work happens in a background runspace; a 500 ms GUI timer drains a synchronized
+hashtable for progress/log updates. Logs to `C:\ProgramData\storage-migrate-backups\`.
+
+### Audit (2026-07-04) — v1.2 → v1.3
+
+Validated with the PowerShell AST parser and PSScriptAnalyzer (no errors; remaining
+warnings are intentional style: best-effort empty catch blocks, GUI helper naming).
+
+1. **Dry-Run was ignored in clone mode (P1, critical).** The checkbox showed a
+   "[DRY-RUN] no real changes" confirmation, but the clone worker had no dry-run
+   parameter at all — a real destructive clone ran anyway. The flag is now passed
+   through and the worker simulates (logs what it would do) without touching disks.
+2. **System disk accepted as destination (P2, critical).** Nothing prevented picking
+   the disk Windows was running from as target; Clear-Disk / raw write would destroy
+   the live system. The start validation now resolves the disk(s) backing
+   `$env:SystemDrive` and refuses them as destination in both modes.
+3. **No size check in clone mode (P3, critical).** Cloning to a smaller disk failed
+   only at the end, with the destination already overwritten. Size validation now
+   applies to both modes upfront.
+4. **Destination disk forced online in `finally` (P4).** The clone worker brought the
+   target online even when it had been offline for another reason (and even in
+   dry-run); it now restores online state only if the worker itself offlined it.
+5. **diskpart failed on MBR sources with a Recovery partition (P5).**
+   `set id=<GUID>` / `gpt attributes=` are GPT-only commands; on MBR they aborted the
+   whole diskpart script. MBR now uses `set id=27`.
+6. **Real robocopy progress (P6).** The progress bar used to jump 15% → 88% after
+   hours of copying. `TotalBytes` is now the source volume's used space and the GUI
+   timer polls the destination volume's used space every ~2 s, deriving MB/s and ETA.
+7. **Smaller fixes:** `-f` format operator swallowed the MessageBox title/icon in the
+   "disk too small" dialog; `Model` could be `$null` (StrictMode crash) for some USB
+   disks; literal `` `n `` in a single-quoted FormClosing message; worker now gets
+   `.Stop()` before `.Dispose()` on close; UTF-8 **BOM added** (PowerShell 5.1 read
+   the diacritics as ANSI mojibake without it); signature-collision warning logged
+   after a successful clone (don't boot with both disks attached); note that the
+   target Recovery partition is created empty (`reagentc /info` hint); dead
+   `Get-FirstFreeDriverLetter` removed; repo URL corrected.
+
+Known limitations (unchanged): the source volume is copied live without VSS snapshot
+(robocopy `/B` reads through most locks but open files can be skipped); WinRE content
+is not copied; robocopy progress approximates via destination used space.
+
+## 11. Operational Safety Checklist
 
 Before a real migration:
 

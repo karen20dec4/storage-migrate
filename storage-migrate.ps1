@@ -1,4 +1,4 @@
-### modificat de user v2
+﻿### modificat de user v2
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -29,9 +29,9 @@
 
 .NOTES
     Author  : karen20ced4 + Copilot
-    Version : 1.2
-    Date    : 2026-03-21
-    Repo    : https://github.com/karen20ced4/NVME-Migrate
+    Version : 1.3
+    Date    : 2026-07-04
+    Repo    : https://github.com/karen20dec4/storage-migrate
     Requires: Windows 10 / Windows 11 / Windows Server 2019+
               PowerShell 5.1+  (built into Windows 10/11)
               Administrator privileges  (auto-prompted)
@@ -48,8 +48,8 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 0 — Version & paths
 # ─────────────────────────────────────────────────────────────────────────────
-$Script:AppVersion = '1.2'
-$Script:AppDate    = '2026-03-22'
+$Script:AppVersion = '1.3'
+$Script:AppDate    = '2026-07-04'
 # Use ProgramData so the path is consistent when script is run elevated
 # (elevation can change $env:USERPROFILE to the built-in Administrator profile)
 $Script:LogDir     = Join-Path $env:ProgramData 'storage-migrate-backups'
@@ -107,8 +107,13 @@ $sync = [hashtable]::Synchronized(@{
     LastError   = [string]''
     StepName    = [string]''
     Phase       = [string]''          # 'clone' | 'migrate'
+    CopyDstLetter = [string]''        # litera volumului destinatie in faza robocopy (progres real)
     LogQueue    = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]')
 })
+
+# Stare pentru sondarea progresului robocopy (folosita doar de timer-ul GUI)
+$Script:CopyPollTime  = [DateTime]::MinValue
+$Script:CopyPollBytes = [long]0
 
 $Script:WorkerPS     = $null
 $Script:WorkerHandle = $null
@@ -138,14 +143,16 @@ function Get-AllPhysicalDisks {
     $disks = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue | Sort-Object Index
     foreach ($d in $disks) {
         $sz = if ($d.Size) { [long]$d.Size } else { 0L }
+        # Model poate fi $null la unele discuri USB/virtuale; .Trim() pe null crapa sub StrictMode
+        $model = if ($d.Model) { ([string]$d.Model).Trim() } else { 'Unknown' }
         [PSCustomObject]@{
             Index    = [int]$d.Index
             DeviceId = $d.DeviceID          # \\.\PHYSICALDRIVE0
-            Model    = $d.Model.Trim()
+            Model    = $model
             SizeBytes= $sz
             SizeHR   = Format-HumanSize $sz
             BusType  = $d.InterfaceType
-            Display  = 'Disk {0}  ─  {1}  ─  {2}' -f $d.Index, (Format-HumanSize $sz), $d.Model.Trim()
+            Display  = 'Disk {0}  ─  {1}  ─  {2}' -f $d.Index, (Format-HumanSize $sz), $model
         }
     }
 }
@@ -171,14 +178,6 @@ function Get-DiskPartitionTable ([int]$diskNumber) {
     return $rows
 }
 
-function Get-FirstFreeDriverLetter {
-    $used = @((Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Name) + @('A','B','C','D')
-    foreach ($l in [char[]]'EFGHIJKLMNOPQRSTUVWXYZ') {
-        if ($l -notin $used) { return [string]$l }
-    }
-    return $null
-}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 5 — Background worker: CLONE (raw sector-by-sector)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,6 +190,7 @@ $Script:CloneWorkerScript = {
         [int]       $dstDiskNumber,
         [string]    $dstDeviceId,
         [int]       $chunkBytes,
+        [bool]      $isDryRun,
         [string]    $logFile
     )
 
@@ -210,8 +210,21 @@ $Script:CloneWorkerScript = {
     $sync.Phase   = 'clone'
     $srcStream    = $null
     $dstStream    = $null
+    $didOffline   = $false
 
     try {
+        # FIX (P1): Dry-Run era IGNORAT in modul clonare — bifat, tot rula clonarea
+        # reala si stergea discul destinatie. Acum simuleaza si iese.
+        if ($isDryRun) {
+            WLog '[DRY-RUN] Simulare clonare — nu se scrie nimic pe disc.' 'DRYRUN'
+            WLog ('[DRY-RUN] Ar clona {0} → {1}  ({2}, chunk {3} MB).' -f `
+                $srcDeviceId, $dstDeviceId, (FmtHR $sync.TotalBytes), [math]::Round($chunkBytes / 1MB)) 'DRYRUN'
+            WLog ('[DRY-RUN] Discul destinatie (Disk {0}) ar fi pus offline pe durata scrierii.' -f $dstDiskNumber) 'DRYRUN'
+            $sync.BytesDone = $sync.TotalBytes
+            $sync.IsSuccess = $true
+            return
+        }
+
         WLog "Deschid disc sursa: $srcDeviceId"
         $srcStream = [System.IO.File]::Open(
             $srcDeviceId,
@@ -226,6 +239,7 @@ $Script:CloneWorkerScript = {
             $d = Get-Disk -Number $dstDiskNumber -ErrorAction Stop
             if (-not $d.IsOffline) {
                 Set-Disk -Number $dstDiskNumber -IsOffline $true -ErrorAction Stop
+                $didOffline = $true
             }
             Set-Disk -Number $dstDiskNumber -IsReadOnly $false -ErrorAction SilentlyContinue
             WLog "Disc destinatie pus offline OK."
@@ -280,6 +294,10 @@ $Script:CloneWorkerScript = {
             WLog 'Sincronizare buffere (flush)...'
             $dstStream.Flush()
             WLog 'Clonare finalizata cu succes!' 'OK'
+            # Clona are aceeasi semnatura MBR / GUID-uri GPT ca sursa: Windows va tine
+            # unul din discuri offline (colisiune semnatura) daca ambele raman conectate.
+            WLog 'IMPORTANT: nu boota cu AMBELE discuri conectate — au aceeasi semnatura/GUID.' 'WARN'
+            WLog 'Scoate discul sursa (sau pe cel clonat) inainte de urmatorul boot.' 'WARN'
             $sync.IsSuccess = $true
         }
 
@@ -290,8 +308,11 @@ $Script:CloneWorkerScript = {
     } finally {
         if ($srcStream) { try { $srcStream.Close(); $srcStream.Dispose() } catch {} }
         if ($dstStream) { try { $dstStream.Flush(); $dstStream.Close(); $dstStream.Dispose() } catch {} }
-        # Bring the target disk back online
-        try { Set-Disk -Number $dstDiskNumber -IsOffline $false -ErrorAction SilentlyContinue } catch {}
+        # FIX (P4): readuce discul online DOAR daca noi l-am pus offline (inainte,
+        # un disc offline din alt motiv era fortat online chiar si in dry-run).
+        if ($didOffline) {
+            try { Set-Disk -Number $dstDiskNumber -IsOffline $false -ErrorAction SilentlyContinue } catch {}
+        }
         $sync.IsRunning = $false
         $sync.IsDone    = $true
         WLog 'Worker clone terminat.' 'INFO'
@@ -502,8 +523,14 @@ $Script:MigrateWorkerScript = {
         if ($recSizeMB -gt 0) {
             $dpLines += "create partition primary size=$recSizeMB"
             $dpLines += 'format quick fs=ntfs label="Recovery"'
-            $dpLines += 'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"'
-            $dpLines += 'gpt attributes=0x8000000000000001'
+            # FIX (P5): 'set id=<GUID>' si 'gpt attributes=' sunt comenzi GPT-only;
+            # pe un disc MBR opreau TOT scriptul diskpart. Pe MBR se foloseste id=27.
+            if ($isUEFI) {
+                $dpLines += 'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"'
+                $dpLines += 'gpt attributes=0x8000000000000001'
+            } else {
+                $dpLines += 'set id=27'
+            }
         }
         $dpScript = $dpLines -join "`r`n"
 
@@ -647,7 +674,24 @@ $Script:MigrateWorkerScript = {
             WLog "[DRY-RUN] robocopy $($roboArgs -join ' ')" 'DRYRUN'
             $sync.BytesDone = [long]([math]::Floor($sync.TotalBytes * 0.88))
         } else {
-            $roboRC = Invoke-Proc 'robocopy.exe' $roboArgs -AllowNonZero
+            # IMP (P6): progres REAL in timpul robocopy — TotalBytes devine spatiul
+            # OCUPAT pe sursa, iar GUI-ul urmareste spatiul ocupat pe volumul
+            # destinatie (CopyDstLetter). Inainte, bara statea la 15% ore intregi.
+            try {
+                $srcVolInfo = Get-Volume -DriveLetter $srcOsLetter -ErrorAction SilentlyContinue
+                if ($srcVolInfo -and $srcVolInfo.Size -gt 0) {
+                    $srcUsed = [long]($srcVolInfo.Size - $srcVolInfo.SizeRemaining)
+                    if ($srcUsed -gt 0) { $sync.TotalBytes = $srcUsed }
+                    WLog ('Spatiu ocupat pe sursa (tinta progresului): {0}' -f (FmtHR $srcUsed))
+                }
+            } catch {}
+            if ($tmpOsLetter) { $sync.CopyDstLetter = [string]$tmpOsLetter }
+
+            try {
+                $roboRC = Invoke-Proc 'robocopy.exe' $roboArgs -AllowNonZero
+            } finally {
+                $sync.CopyDstLetter = ''
+            }
             # robocopy exit codes: 0-7 = success/warning, 8+ = error
             if ($roboRC -ge 8) {
                 throw "robocopy a esuat cu cod $roboRC (>=8 inseamna eroare de copiere). Verifica $roboLog"
@@ -680,6 +724,13 @@ $Script:MigrateWorkerScript = {
         Invoke-Proc $bcdbootExe $bcdArgs | Out-Null
 
         $sync.BytesDone = $sync.TotalBytes
+
+        if ($recSizeMB -gt 0) {
+            # Partitia Recovery e creata pe tinta, dar continutul WinRE nu e copiat
+            # (WinRE e de obicei re-activabil din C:\Windows\System32\Recovery).
+            WLog 'Nota: partitia Recovery de pe tinta este GOALA (WinRE nu se copiaza).' 'WARN'
+            WLog 'Dupa primul boot ruleaza: reagentc /info  (si, la nevoie, reagentc /enable).' 'WARN'
+        }
 
         # ── Done ──────────────────────────────────────────────────────────────
         WStep 'Migrare OS finalizata cu succes'
@@ -1230,6 +1281,28 @@ $guiTimer.Add_Tick({
     if ($sync.StepName) { $lblStep.Text = $sync.StepName }
 
     if ($sync.IsRunning) {
+        # IMP (P6): progres real in faza robocopy — sondam la ~2s spatiul ocupat
+        # pe volumul destinatie si derivam si viteza din delta.
+        if ($sync.Phase -eq 'migrate' -and $sync.CopyDstLetter) {
+            $nowPoll = [DateTime]::UtcNow
+            if (($nowPoll - $Script:CopyPollTime).TotalSeconds -ge 2) {
+                try {
+                    $v = Get-Volume -DriveLetter $sync.CopyDstLetter -ErrorAction SilentlyContinue
+                    if ($v -and $v.Size -gt 0) {
+                        $used  = [long]($v.Size - $v.SizeRemaining)
+                        $dtSec = ($nowPoll - $Script:CopyPollTime).TotalSeconds
+                        $delta = $used - $Script:CopyPollBytes
+                        if ($Script:CopyPollTime -ne [DateTime]::MinValue -and $delta -gt 0 -and $dtSec -gt 0) {
+                            $sync.SpeedBps = [long]($delta / $dtSec)
+                        }
+                        $Script:CopyPollBytes = $used
+                        $sync.BytesDone = $used
+                    }
+                } catch {}
+                $Script:CopyPollTime = $nowPoll
+            }
+        }
+
         $bytesDone  = $sync.BytesDone
         $totalBytes = $sync.TotalBytes
         $speedBps   = $sync.SpeedBps
@@ -1366,11 +1439,35 @@ $btnStart.Add_Click({
         return
     }
 
-    if (-not $isClone -and $dstDisk.SizeBytes -lt $srcDisk.SizeBytes) {
+    # FIX (P2): refuza discul de SISTEM (cel de pe care ruleaza Windows-ul curent)
+    # ca destinatie — Clear-Disk / clonarea raw ar distruge sistemul care ruleaza.
+    $sysDiskNumbers = @()
+    try {
+        $sysLetter      = ($env:SystemDrive).TrimEnd(':')
+        $sysDiskNumbers = @(Get-Partition -DriveLetter $sysLetter -ErrorAction SilentlyContinue |
+                            Select-Object -ExpandProperty DiskNumber -Unique)
+    } catch {}
+    if ($dstDisk.Index -in $sysDiskNumbers) {
         [System.Windows.Forms.MessageBox]::Show(
-            ("Discul destinație ({0}) este mai mic decât sursa ({1})!`n" +
-             'Migrarea OS necesită ca destinația să fie cel puțin egală cu sursa.') -f
-            $dstDisk.SizeHR, $srcDisk.SizeHR,
+            ("Discul destinație (Disk {0}) este discul de SISTEM — de pe el rulează Windows-ul curent!`n" +
+             'Alege alt disc destinație.') -f $dstDisk.Index,
+            'Destinație interzisă',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    # FIX (P3): verificarea de marime lipsea complet in modul CLONARE — clona raw
+    # spre un disc mai mic esua abia la final, cu destinatia deja suprascrisa.
+    # FIX (MessageBox): '-f' isi "inghitea" titlul si iconita ca argumente de format;
+    # mesajul se formateaza acum separat.
+    if ($dstDisk.SizeBytes -lt $srcDisk.SizeBytes) {
+        $sizeMsg = ("Discul destinație ({0}) este mai mic decât sursa ({1})!`n" +
+                    $(if ($isClone) { 'Clonarea sector-by-sector necesită destinație cel puțin egală cu sursa.' }
+                      else          { 'Migrarea OS necesită ca destinația să fie cel puțin egală cu sursa.' })) -f
+                   $dstDisk.SizeHR, $srcDisk.SizeHR
+        [System.Windows.Forms.MessageBox]::Show(
+            $sizeMsg,
             'Disc prea mic',
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
@@ -1406,6 +1503,9 @@ Confirmi începerea operațiunii?
     $sync.StepName    = 'Pornire...'
     $sync.TotalBytes  = if ($isClone) { $srcDisk.SizeBytes } else { 0L }
     $sync.Phase       = if ($isClone) { 'clone' } else { 'migrate' }
+    $sync.CopyDstLetter    = ''
+    $Script:CopyPollTime   = [DateTime]::MinValue
+    $Script:CopyPollBytes  = [long]0
 
     Set-UIRunning $true
     Reset-ProgressUI
@@ -1437,6 +1537,7 @@ Confirmi începerea operațiunii?
         [void]$Script:WorkerPS.AddArgument($dstDisk.Index)
         [void]$Script:WorkerPS.AddArgument($dstDisk.DeviceId)
         [void]$Script:WorkerPS.AddArgument(4194304)                 # 4 MB chunk
+        [void]$Script:WorkerPS.AddArgument($isDryRun)               # FIX (P1)
         [void]$Script:WorkerPS.AddArgument($Script:LogFile)
     } else {
         [void]$Script:WorkerPS.AddScript($Script:MigrateWorkerScript)
@@ -1453,8 +1554,9 @@ Confirmi începerea operațiunii?
 
 $form.Add_FormClosing({
     if ($sync.IsRunning) {
+        # FIX: `n intre ghilimele SIMPLE era afisat literal, nu ca linie noua
         $r = [System.Windows.Forms.MessageBox]::Show(
-            'O operațiune este în curs de desfășurare.`nForțezi închiderea (operațiunea va fi întreruptă)?',
+            "O operațiune este în curs de desfășurare.`nForțezi închiderea (operațiunea va fi întreruptă)?",
             'Operațiune activă',
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -1466,7 +1568,9 @@ $form.Add_FormClosing({
         Start-Sleep -Milliseconds 700
     }
     $guiTimer.Stop()
-    if ($Script:WorkerPS) { try { $Script:WorkerPS.Dispose() } catch {} }
+    # Opreste worker-ul inainte de Dispose (Dispose pe un pipeline in executie
+    # poate lasa scrieri pe disc neterminate fara oprire ordonata).
+    if ($Script:WorkerPS) { try { $Script:WorkerPS.Stop() } catch {} ; try { $Script:WorkerPS.Dispose() } catch {} }
     if ($Script:WorkerRS) { try { $Script:WorkerRS.Close(); $Script:WorkerRS.Dispose() } catch {} }
 })
 
@@ -1508,7 +1612,7 @@ Invoke-RefreshDisks
 # Welcome messages in log area
 Write-GuiLog "  ╔══════════════════════════════════════════════════════════════════════╗"
 Write-GuiLog "  ║   Windows Storage Migration Tool  v$Script:AppVersion  —  $Script:AppDate   ║"
-Write-GuiLog "  ║   Repo: https://github.com/karen20ced4/NVME-Migrate                 ║"
+Write-GuiLog "  ║   Repo: https://github.com/karen20dec4/storage-migrate              ║"
 Write-GuiLog "  ╚══════════════════════════════════════════════════════════════════════╝"
 Write-GuiLog ''
 Write-GuiLog "  Log fisier: $Script:LogFile"
