@@ -1,5 +1,7 @@
 # Comprehensive Documentation
 
+**Current versions:** `storage-migrate.sh` v2.11, `storage-post-migration.sh` v2.4 (2026-07-04).
+
 ## 1. Project Purpose
 
 This repository contains a Debian-focused storage migration toolkit implemented as Bash scripts. It is designed to help move a system from one disk to another, either by copying a root filesystem and installing GRUB on a new disk, by moving LVM Physical Volume data with `pvmove`, or by combining both operations for a full-disk migration.
@@ -131,7 +133,7 @@ For `root-only` and `full-disk`, the script:
 5. Runs `partprobe` and waits for device nodes.
 6. Formats root, swap, and ESP where applicable.
 7. Mounts the new root at `/mnt/newroot`.
-8. Runs `rsync -aAXH` from `/` to the new root, excluding pseudo-filesystems and **every separately-mounted block-device filesystem** (e.g. `/home`, `/data`, `/boot/efi`). Their data stays on its own partition/disk; only the empty mountpoint directory is recreated and `fstab` remounts it after boot.
+8. Runs `rsync -aAXH --delete` from `/` to the new root **in two passes** — a long bulk pass, then a fast delta pass that captures files changed on the live system during the first pass (shrinks the inconsistency window from hours to seconds). Both passes exclude pseudo-filesystems and **every separately-mounted block-device filesystem** (e.g. `/home`, `/data`, `/boot/efi`). Their data stays on its own partition/disk; only the empty mountpoint directory is recreated and `fstab` remounts it after boot.
 9. Bind-mounts `/dev`, `/proc`, `/sys`, `/run`, and optionally `/dev/pts`.
 10. Copies and sanitizes `/etc/default/grub`.
 11. Installs GRUB in UEFI or BIOS mode.
@@ -139,8 +141,9 @@ For `root-only` and `full-disk`, the script:
 13. Runs `update-grub` and `update-initramfs`.
 14. Rewrites target `/etc/fstab` using UUIDs.
 15. Validates the generated fstab in a chroot with `mount -fav -T`.
-16. Optionally runs `e2fsck`.
-17. Cleans temporary mounts.
+16. Runs a **boot sanity check** while the target is still mounted: kernel (`vmlinuz-*`) and initrd present in the target `/boot`, `grub.cfg` references the new root UUID, and the bootloader is really installed (EFI binary on the ESP for UEFI, GRUB signature in the MBR for BIOS). A failure aborts the migration with an explicit "do not swap the disk yet" message.
+17. Optionally runs `e2fsck`.
+18. Cleans temporary mounts.
 
 For `full-disk`, it also creates a target LVM PV and moves data from source PVs after the root copy.
 
@@ -176,6 +179,11 @@ The script logs to:
 ```
 
 When `--root` is used, the log path is resolved inside that root.
+
+Option values are validated immediately after parsing, interactive prompts read from
+`/dev/tty` (defaulting to "no" when no terminal is available), and the final summary
+table is emitted through an `EXIT` trap, so it also appears when the script dies
+mid-run.
 
 ## 5. Audit Findings and Repairs Applied
 
@@ -237,6 +245,73 @@ A follow-up review (validated with `bash -n` and ShellCheck 0.10) found and fixe
 4. **Minor hardening:** quoted `${2-}` in `storage-post-migration.sh` argument parsing
    (consistency with the main script) and quoted two unquoted summary `echo $(…)` lines.
 
+### Third audit (2026-07-04) — v2.10/v2.3, then v2.11/v2.4
+
+A full re-audit (validated with `bash -n`, ShellCheck, and safe smoke tests) fixed the
+following, released as `storage-migrate.sh` v2.10 and `storage-post-migration.sh` v2.3:
+
+1. **Target-disk in-use guard (`storage-migrate.sh`, A1).** `wipefs -a` on a whole disk
+   can succeed even while its partitions are mounted, destroying the partition table of
+   a disk still in use. A new `target_disk_in_use()` check now rejects a target whose
+   partitions are mounted, are active LVM PVs, or are active swap — on both the
+   interactive and the `--target` paths.
+
+2. **Multi-VG source abort (A2).** A PV can belong to only one VG, so a source disk with
+   PVs from two or more VGs would fail mid-migration at the second `vgextend`/`pvmove`
+   (after the target was already wiped). The script now aborts explicitly before any
+   destructive operation.
+
+3. **Space check includes LVM (A3).** The fits-on-target estimate now sums used root
+   space, used PV space, and swap. Previously an `lvm-only` migration to a smaller disk
+   only produced a warning and failed hours later during `pvmove`.
+
+4. **Phantom VG from empty array (A4).** `printf '%s\n'` with an empty array emitted one
+   blank line, so `readarray` produced `DETECTED_VGS=("")`.
+
+5. **JSON metadata (A5).** Empty arrays serialized as `[""]` instead of `[]`; a
+   `json_string_array` helper fixed both `source_pvs` and `detected_vgs`.
+
+6. **Disk selection filters `TYPE=disk` (A6).** CD-ROM/loop devices no longer appear as
+   wipe candidates, and manually typed paths must be whole disks (not partitions).
+
+7. **ESP copy uses `rsync -rt` (A7).** FAT32 has no owner/ACL/xattr support, so
+   `-aAXH` produced errors that were masked by `|| true`.
+
+8. **Cleanup on INT/TERM (A8).** Ctrl+C during rsync previously left `/mnt/newroot`
+   with pseudo-filesystems bind-mounted; the cleanup trap now also covers INT and TERM.
+
+9. **`_ask` reads from `/dev/tty` (`storage-post-migration.sh`, A1).** Inside
+   `extend_lvm_volumes` the while-loop's stdin is the herestring with the VG list, so
+   the confirmation `read` consumed the next line or got EOF — which defaulted to
+   **"yes" and ran `lvextend` without consent**. Prompts now read from the terminal,
+   and with no TTY the answer defaults to "no".
+
+10. **CLI values validated upfront (A2).** A bad value (e.g. `--fix-cdrom foo`)
+    previously killed the script mid-run via `set -e`, without the summary table.
+
+11. **Locale-safe LVM parsing (A3).** `vgs` under a decimal-comma locale printed
+    `5,00g`, breaking both the `--separator=','` split and `printf %.0f`; calls now run
+    under `LC_ALL=C` and `vg_name` is trimmed of `--noheadings` indentation before
+    being used in `--select`.
+
+12. **dpkg repair in the target root (A4).** The `apt-get -f install` / `dpkg
+    --configure -a` fallback now runs through `_chroot` instead of on the host when
+    `--root` is used.
+
+13. **`blacklist_floppy` creates `modprobe.d` if missing** (surfaced by the EXIT-trap
+    smoke test against a minimal `--root`).
+
+On top of the fixes, three improvements were added as v2.11 / v2.4:
+
+- **Two-pass rsync with delta (I1, `storage-migrate.sh`).** See workflow step 8 above.
+  `--delete` was added so the target mirrors the source; excluded paths stay protected.
+- **Boot sanity check (I2, `storage-migrate.sh`).** See workflow step 16 above. Note
+  this is a semantic change: a failed `update-grub` now aborts the migration instead of
+  only warning.
+- **Summary via EXIT trap (I12, `storage-post-migration.sh`).** The summary table now
+  prints even when `set -e` or a signal kills the script mid-run — an interrupted step
+  is marked `✖ INTRERUPT` and a non-zero exit code is reported.
+
 ## 6. Important Implementation Details
 
 ### Command Execution
@@ -271,17 +346,22 @@ The following non-destructive checks were run:
 
 ```bash
 bash -n storage-migrate.sh storage-post-migration.sh
+shellcheck -x -S warning storage-migrate.sh storage-post-migration.sh
 bash storage-migrate.sh --help
 bash storage-post-migration.sh --help
 bash storage-migrate.sh --source
 bash storage-post-migration.sh --root --verbose
+bash storage-post-migration.sh --fix-cdrom bogus     # CLI validation, exits 1
+bash storage-post-migration.sh --root <empty-dir>    # EXIT-trap summary smoke test
 ```
 
 Expected outcomes:
 
 - Syntax check exits successfully.
+- ShellCheck reports no findings beyond the intentional `TARGET_EXTRA` compatibility variable (SC2034).
 - Help commands print usage and exit `0`.
-- Missing-value commands exit `1` and print explicit errors.
+- Missing-value and invalid-value commands exit `1` and print explicit errors.
+- The post-migration summary table prints even when a step fails mid-run.
 
 Destructive migration flows were not executed in this environment because they require real or virtual block devices and root-level disk operations.
 

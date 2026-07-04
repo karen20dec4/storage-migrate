@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# post-migration.sh v2.2 - Added LVM auto-extend
+# post-migration.sh v2.4 - Summary via EXIT trap; v2.3 audit fixes (ask-from-tty, CLI validation, locale, chroot repair)
 # - Summary-mode by default (concise console output)
 # - Verbose mode streams command output (useful for debugging)
 # - All detailed output is logged to LOG (default /root/storage-migrate-backups/post-migration.log)
@@ -13,7 +13,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.2"
+SCRIPT_VERSION="2.4"
 ROOT="/"
 MODE="preboot"
 FIX_RESUME="auto"
@@ -47,14 +47,22 @@ _yellow() { [ "$COLOR" = true ] && printf '\033[1;33m%s\033[0m' "$1" || printf '
 _blue() { [ "$COLOR" = true ] && printf '\033[0;34m%s\033[0m' "$1" || printf '%s' "$1"; }
 
 # Helper for interactive ask
+# FIX (A1): citește explicit de la terminal (/dev/tty). În extend_lvm_volumes
+# stdin-ul buclei while e herestring-ul cu lista VG-urilor: read de pe stdin
+# consuma linia următoare sau primea EOF => răspuns implicit "yes" FĂRĂ
+# consimțământul utilizatorului (lvextend nedorit). Fără TTY => implicit "no".
 _ask() {
   [ "${VERBOSITY}" = "quiet" ] && return 1 # if quiet, default to no
   local prompt="$1" default="${2:-yes}" response
+  if [ ! -e /dev/tty ]; then
+    _log_write "No TTY for prompt '${prompt}'; defaulting to NO."
+    return 1
+  fi
   if [ "$default" = "yes" ]; then
-    read -rp "$(_yellow "$prompt") [Y/n]: " response
+    read -rp "$(_yellow "$prompt") [Y/n]: " response < /dev/tty || return 1
     response=${response:-y}
   else
-    read -rp "$(_yellow "$prompt") [y/N]: " response
+    read -rp "$(_yellow "$prompt") [y/N]: " response < /dev/tty || return 1
     response=${response:-n}
   fi
   [[ "$response" =~ ^[Yy] ]]
@@ -79,7 +87,7 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-post-migration.sh v2.2
+post-migration.sh v2.4
 Usage:
   ./post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:
@@ -100,6 +108,13 @@ USAGE
   esac
   shift
 done
+
+# FIX (A2): validează valorile opțiunilor imediat; înainte, o valoare greșită
+# (ex. --fix-cdrom foo) omora scriptul abia la mijlocul rulării (set -e după
+# step_fail), fără tabelul de sumar.
+case "${FIX_RESUME}" in auto|disable|uuid=?*) ;; *) ce "Invalid --fix-resume: ${FIX_RESUME} (auto|disable|uuid=<UUID>)"; exit 1 ;; esac
+case "${FIX_CDROM}" in keep|comment|nofail) ;; *) ce "Invalid --fix-cdrom: ${FIX_CDROM} (keep|comment|nofail)"; exit 1 ;; esac
+case "${EXTEND_LVM}" in auto|ask|no) ;; *) ce "Invalid --extend-lvm: ${EXTEND_LVM} (auto|ask|no)"; exit 1 ;; esac
 
 require_root
 
@@ -279,6 +294,7 @@ blacklist_floppy() {
   step_start "Blacklist floppy"
   [ "${BLACKLIST_FLOPPY}" = "yes" ] || { _log_write "Floppy blacklist disabled"; step_ok; return 0; }
   local conf; conf="$(path_in_root /etc/modprobe.d/blacklist-floppy.conf)"
+  mkdir -p "$(dirname "${conf}")"
   echo "blacklist floppy" > "${conf}"
   _log_write "Floppy module blacklisted"
   step_ok
@@ -378,8 +394,10 @@ extend_lvm_volumes() {
     step_ok; return 0 # Not a failure, just a skip
   fi
 
+  # FIX (A3): LC_ALL=C — în locale cu virgulă zecimală, vgs afișa "5,00g" și
+  # strica atât split-ul pe --separator=',' cât și printf %.0f de mai jos.
   local vgs_with_free
-  vgs_with_free=$(vgs_in_root --noheadings --units g -o vg_name,vfree --separator=',' --select 'vfree > 1' 2>/dev/null || true)
+  vgs_with_free=$(LC_ALL=C vgs_in_root --noheadings --units g -o vg_name,vfree --separator=',' --select 'vfree > 1' 2>/dev/null || true)
   
   if [ -z "${vgs_with_free}" ]; then
     _log_write "No VGs found with >1G free space."
@@ -391,6 +409,9 @@ extend_lvm_volumes() {
   local vg_name vfree lv_path mountpoint fs_type extend_count=0 overall_ok=true
 
   while IFS=',' read -r vg_name vfree; do
+    # FIX (A3): --noheadings indentează output-ul; fără trim, vg_name intra cu
+    # spații în --select "vg_name=..." de mai jos.
+    vg_name=$(echo "${vg_name}" | xargs)
     [ -z "${vg_name}" ] && continue
     vfree=$(echo "${vfree}" | tr -d '[:space:]' | sed 's/[gG]$//')
     vfree=$(LC_ALL=C printf "%.0f" "${vfree}" 2>/dev/null || echo "0")
@@ -522,8 +543,51 @@ postboot_audit() {
   step_ok
 }
 
+# IMP (I12): sumarul e afișat printr-un trap EXIT, ca să apară și când set -e
+# sau un semnal omoară scriptul la mijloc — exact când e cel mai util. Un pas
+# rămas "running" e marcat INTRERUPT.
+print_final_summary() {
+  local rc=$?
+  [ "${#STEPS_NAME[@]}" -gt 0 ] || return 0
+  local i num name status dur status_str now total_dur
+  now=$(_ts)
+  echo ""
+  echo "$(_blue "========== post-migration summary ==========")"
+  printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
+  echo "---------------------------------------------------------------------"
+  for i in "${!STEPS_NAME[@]}"; do
+    num=$((i+1))
+    name="${STEPS_NAME[$i]}"
+    status="${STEPS_STATUS[$i]}"
+    dur="${STEPS_TIME[$i]}"
+    if [ "${status}" = "ok" ]; then
+      status_str="$(_green "✓ OK")"
+    elif [ "${status}" = "failed" ]; then
+      status_str="$(_red "✖ FAIL")"
+    elif [ "${status}" = "running" ]; then
+      status_str="$(_red "✖ INTRERUPT")"
+      dur=$(( now - dur ))
+    else
+      status_str="$(_yellow "${status}")"
+    fi
+    printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
+  done
+  total_dur=$(( now - main_start ))
+  echo "---------------------------------------------------------------------"
+  echo "Total time: ${total_dur}s"
+  if [ "${rc}" -ne 0 ]; then
+    echo "$(_red "Script terminat cu eroare (rc=${rc}) — vezi log-ul.")"
+  fi
+  echo ""
+  echo "Detailed log: ${LOG}"
+  echo "$(_blue "=============================================")"
+  _log_write "=== post-migration.sh done rc=${rc} (total ${total_dur}s) ==="
+  return 0
+}
+
 # Run main
 main_start=$(_ts)
+trap print_final_summary EXIT
 _log_write "=== post-migration.sh v${SCRIPT_VERSION} start ==="
 log_summary "post-migration.sh v${SCRIPT_VERSION} - mode=${MODE} root=${ROOT} verbosity=${VERBOSITY} extend_lvm=${EXTEND_LVM}"
 
@@ -538,8 +602,9 @@ extend_lvm_volumes
 
 if ! rebuild_boot_artifacts; then
   log_summary "WARN: update-initramfs/update-grub failed; attempting quick dpkg repair..."
-  run_cmd apt-get -y -f install || true
-  run_cmd dpkg --configure -a || true
+  # FIX (A4): repară în ROOT-ul țintă (prin _chroot), nu pe host, când rulăm cu --root.
+  run_cmd _chroot apt-get -y -f install || true
+  run_cmd _chroot dpkg --configure -a || true
   if ! rebuild_boot_artifacts; then
     log_error "Still failed to update boot artifacts. See ${LOG}"
   fi
@@ -547,35 +612,5 @@ fi
 
 [ "${MODE}" = "postboot" ] && postboot_audit
 
-# Final summary table (full)
-echo ""
-echo ""
-echo ""
-echo ""
-echo "$(_blue "========== post-migration summary ==========")"
-printf "%-3s  %-40s  %-8s   %6s\n" "#" "STEP" "STATUS" "DUR(s)"
-echo "---------------------------------------------------------------------"
-for i in "${!STEPS_NAME[@]}"; do
-  num=$((i+1))
-  name="${STEPS_NAME[$i]}"
-  status="${STEPS_STATUS[$i]}"
-  dur="${STEPS_TIME[$i]}"
-  if [ "${status}" = "ok" ]; then
-    status_str="$(_green "✓ OK")"
-  elif [ "${status}" = "failed" ]; then
-    status_str="$(_red "✖ FAIL")"
-  else
-    status_str="$(_yellow "${status}")"
-  fi
-  printf "%-3s  %-40s  %-8s   %6s\n" "${num}" "${name:0:40}" "${status_str}" "${dur}"
-done
-total_dur=$(( $(_ts) - main_start ))
-echo "---------------------------------------------------------------------"
-echo "Total time: ${total_dur}s"
-echo ""
-echo "Detailed log: ${LOG}"
-echo "$(_blue "=============================================")"
-
-_log_write "=== post-migration.sh done (total ${total_dur}s) ==="
-
+# Sumarul final se afișează automat prin trap-ul EXIT (print_final_summary).
 exit 0
