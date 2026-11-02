@@ -1,6 +1,6 @@
 # Comprehensive Documentation
 
-**Current versions:** `storage-migrate.sh` v2.11, `storage-post-migration.sh` v2.4 (2026-07-04).
+**Current versions:** `storage-migrate.sh` v2.12, `storage-post-migration.sh` v2.5 (2026-11-02).
 
 ## 1. Project Purpose
 
@@ -46,11 +46,11 @@ The application is not a long-running service. It is a command-line automation w
 The script uses:
 
 ```bash
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
 ```
 
-This catches unset variables, failed commands, and pipeline errors. Most risky commands are routed through `log_command` or `log_interactive_command`, which record the command and exit code in `/var/log/storage-migrate.log`.
+This catches unset variables, failed commands, and pipeline errors. `-E` makes the `ERR` trap fire inside functions, so mounts under `/mnt/newroot` are cleaned up after an unexpected failure; only the main shell performs that cleanup, never a subshell. Most risky commands are routed through `log_command` or `log_interactive_command`, which record the command and exit code in `/var/log/storage-migrate.log`.
 
 Important global paths:
 
@@ -95,6 +95,20 @@ sudo ./storage-migrate.sh \
 
 `--yes` is deliberately separate from `--source` and `--target` because the target disk is erased.
 
+Migrating off a failing disk, reading the root tree from a complete backup instead of the live disk:
+
+```bash
+sudo ./storage-migrate.sh \
+  --source /dev/sda \
+  --target /dev/nvme0n1 \
+  --source-root /backup/rootfs \
+  --root-size 100
+```
+
+`--source-root` applies to `root-only` and `full-disk` migrations and is refused when the source disk has other separate partitions, because those are not part of the backup. The tree must contain `etc/fstab` and `boot/`; an empty `boot/efi` falls back to copying the live ESP.
+
+If rsync cannot copy some files (exit 23, e.g. a bad sector) after the delta pass, the list goes to `rsync-failed-files.log` in the backup directory and the script asks whether to continue. With `--yes` it stops unless `--allow-read-errors` is also given.
+
 ### Migration Type Detection
 
 The script scans partitions on the selected source disk with `lsblk`, `findmnt`, `swapon`, and LVM commands. It classifies the operation as:
@@ -126,7 +140,7 @@ If `pvmove` fails, the resume file remains available.
 For `root-only` and `full-disk`, the script:
 
 1. Computes partition sizes in MiB.
-2. Validates that boot, root, and swap partitions fit before destructive writes.
+2. Validates before destructive writes that boot, root, swap, and used LVM space fit on the target, and that the chosen root size holds the data to copy plus 5%.
 3. Wipes target signatures and creates a GPT table.
 4. Creates either:
    - UEFI layout: ESP, root, swap, optional LVM partition.
@@ -134,7 +148,7 @@ For `root-only` and `full-disk`, the script:
 5. Runs `partprobe` and waits for device nodes.
 6. Formats root, swap, and ESP where applicable.
 7. Mounts the new root at `/mnt/newroot`.
-8. Runs `rsync -aAXH --delete` from `/` to the new root **in two passes** — a long bulk pass, then a fast delta pass that captures files changed on the live system during the first pass (shrinks the inconsistency window from hours to seconds). Both passes exclude pseudo-filesystems and **every separately-mounted block-device filesystem** (e.g. `/home`, `/data`, `/boot/efi`). Their data stays on its own partition/disk; only the empty mountpoint directory is recreated and `fstab` remounts it after boot.
+8. Runs `rsync -aAXH --numeric-ids --delete` from `/` (or `--source-root`) to the new root **in two passes** — a long bulk pass, then a fast delta pass that captures files changed on the live system during the first pass (shrinks the inconsistency window from hours to seconds). Both passes exclude pseudo-filesystems and **every other mountpoint**, including non-block mounts such as Docker overlays. Their data stays where it is; only the empty mountpoint directory is recreated and `fstab` remounts it after boot. The exception is a plain partition on the **source disk** (e.g. a separate `/boot` or `/home`): it is copied into the new root and its `fstab` line is commented out, because that partition leaves with the old disk. `/boot/efi` is handled separately, LVs move with `pvmove`, and partitions mounted under `/mnt` or `/media` only produce a warning.
 9. Bind-mounts `/dev`, `/proc`, `/sys`, `/run`, and optionally `/dev/pts`.
 10. Copies and sanitizes `/etc/default/grub`.
 11. Installs GRUB in UEFI or BIOS mode.
@@ -313,6 +327,38 @@ On top of the fixes, three improvements were added as v2.11 / v2.4:
   prints even when `set -e` or a signal kills the script mid-run — an interrupted step
   is marked `✖ INTRERUPT` and a non-zero exit code is reported.
 
+### Fourth audit (2026-11-02) — v2.12/v2.5
+
+Triggered by a real failing NVMe disk (a medium read error, followed by an unclean shutdown). Every bug below was reproduced on v2.11/v2.4 with function-level tests and real `--check` runs before fixing, except the items marked *(by reading)*. See §7 for what was not run.
+
+`storage-migrate.sh`:
+
+- **B1** `target_disk_in_use` only inspected `TYPE=part` nodes: a filesystem mounted on the whole disk, a whole-disk PV, or a LUKS/RAID/LVM holder passed as free. It now walks the whole `lsblk` tree.
+- **B2** `--source` / `--target` accepted a partition, so `--target` on a free partition of the root disk passed the guard. Added `require_whole_disk`.
+- **B3** rsync descended into non-block mounts (Docker `overlay2/*/merged`), and partitions separate from root on the source disk were excluded, leaving `/boot` or `/home` behind on the disk being removed. See `build_rsync_excludes`.
+- **B4** Root size was never compared with the data to copy, and the default could not fit on a same-size disk. `full-disk` also ignored LVM space. See `validate_root_size`, `max_root_size_gb`.
+- **B5** The `ERR` trap did not fire inside functions (no `set -E`). Added it, restricted cleanup to the main shell, and made SIGINT/SIGTERM exit 130/143: SIGINT could exit 0.
+- **B6** rsync exit 23 aborted after the full copy; it is now reported and decided as described in §3.
+- **B7** At EOF the disk prompt looped forever and the single-disk prompt auto-confirmed. It now aborts.
+- **B8** `get_part_name` produced `/dev/nbd01`; it now follows the kernel rule (a name ending in a digit takes `p`).
+- **B9** A bind mount of `/` hid the root from `scan_disk_usage`.
+- **B10** Mountpoint names reached `eval` inside single quotes; the output now uses `printf %q`.
+- **B11** *(stubbed LVM)* A second PV of the same VG failed on a repeated `vgextend`.
+- **B12** *(by reading)* Success was printed even when `vgreduce` failed.
+- **B13** `--resume` ran before the root check.
+- **B14** `clear` without `TERM` killed the script through `set -e`.
+- **B15** *(by reading)* A btrfs root source (`/dev/sda2[/@rootfs]`) was not resolved, so the root disk lost its protection. The script now also refuses to continue if the root disk cannot be determined.
+- **B16** *(by reading)* Root-on-LVM with `/boot` or the ESP on the source is classified `lvm-only`; `pvmove` does not move those. It now warns, asks, and refuses under `--yes`.
+- **B17** *(message only)* NVRAM entries point at the old ESP PARTUUID; the final summary explains how to recreate the entry after the first boot.
+
+`storage-post-migration.sh`:
+
+- **P3** `--blacklist-floppy`, `--sync-fstab-swap`, and `--quiet-boot` values are validated.
+- **P6** With `--root`, the host's active swap (the old disk) overwrote the target's `fstab` and resume UUID.
+- **P7, P8** The CD-ROM `device-timeout` option and `quiet loglevel=3` grew on every run.
+- **P9** The script exited 0 after failing to rebuild initramfs/GRUB.
+- *(by reading)* The LVM free-space filter now states its unit: `vfree > 1g`.
+
 ## 6. Important Implementation Details
 
 ### Command Execution
@@ -328,12 +374,17 @@ On top of the fixes, three improvements were added as v2.11 / v2.4:
 - `/dev/sda` + partition 1 -> `/dev/sda1`
 - `/dev/nvme0n1` + partition 1 -> `/dev/nvme0n1p1`
 - `/dev/mmcblk0` + partition 1 -> `/dev/mmcblk0p1`
+- `/dev/nbd0` + partition 1 -> `/dev/nbd0p1`
+
+The rule matches the kernel: a disk name ending in a digit takes the `p` separator.
 
 ### fstab Rewrite
 
 The root migration flow writes a temporary target fstab and only replaces the real target fstab after validation succeeds. UUIDs are obtained with `blkid` for root, swap, and ESP.
 
 In BIOS mode, `/boot/efi` entries are dropped from the generated fstab.
+
+Entries for partitions copied into the new root (see `FLATTENED_MOUNTS`) are commented out with the prefix `# inclus in root de storage-migrate:`.
 
 ### Chroot Behavior
 
@@ -366,6 +417,12 @@ Expected outcomes:
 
 Destructive migration flows were not executed in this environment because they require real or virtual block devices and root-level disk operations.
 
+### Fourth audit coverage (2026-11-02)
+
+Run on a live Debian 13 host, without touching a real target disk: `bash -n`, `shellcheck`, function-level tests on loop devices in a private mount namespace, real `--check` runs against a sparse loop target, a real rsync exit 23 run, and `storage-post-migration.sh` on a throwaway root. The same tests were run against v2.11/v2.4 to confirm they fail there.
+
+**Not run:** a complete migration. Partitioning, GRUB, chroot, `pvmove`, the flattened-partition flow, and `--source-root` beyond `--check` still need the VM matrix below, which this project requires for destructive flows.
+
 ## 8. Recommended External Verification
 
 A second AI or human reviewer should inspect:
@@ -396,7 +453,9 @@ Debian 12 root-on-LVM, lvm-only migration path
 ## 9. Known Limitations
 
 - The scripts are Debian-oriented and assume Debian package names and GRUB tooling.
-- Root-on-LVM is treated primarily through the LVM migration path; boot partition edge cases still need VM validation.
+- Root-on-LVM with boot data on the source is not migrated: `pvmove` moves only the LVs, so the source disk stays required at boot (the script warns and refuses under `--yes`).
+- Separate partitions on the source disk are flattened into the new root, not recreated, and the mounts under `/mnt` and `/media` are not copied.
+- Reading a failing source disk can stall or fail; `--source-root` avoids reading its root filesystem.
 - `storage-migrate.sh --check` validates planning and prerequisites but does not simulate every runtime chroot or GRUB condition.
 - Network-dependent package installation inside chroot may fail if the target system has no network or broken APT configuration.
 - Filesystems other than ext-family and xfs have limited automatic resize support in post-migration.
@@ -454,6 +513,7 @@ Before a real migration:
 1. Confirm complete backups exist.
 2. Confirm source and target device names with `lsblk -f`.
 3. Run `sudo ./storage-migrate.sh --check`.
+   If the source disk is failing, make a complete backup with services stopped and add `--source-root`.
 4. Read the dry-run command list.
 5. Confirm target disk contains no data that must be preserved.
 6. Keep console access available for boot recovery.

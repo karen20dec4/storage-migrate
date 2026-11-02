@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# post-migration.sh v2.4 - Summary via EXIT trap; v2.3 audit fixes (ask-from-tty, CLI validation, locale, chroot repair)
+# post-migration.sh v2.5 - Audit fixes (swap din --root, idempotență, exit code);
+# v2.4 summary via EXIT trap; v2.3 audit fixes (ask-from-tty, CLI validation, locale, chroot repair)
 # - Summary-mode by default (concise console output)
 # - Verbose mode streams command output (useful for debugging)
 # - All detailed output is logged to LOG (default /root/storage-migrate-backups/post-migration.log)
@@ -13,7 +14,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.4"
+SCRIPT_VERSION="2.5"
 ROOT="/"
 MODE="preboot"
 FIX_RESUME="auto"
@@ -87,7 +88,7 @@ while [ $# -gt 0 ]; do
     --no-color) COLOR=false ;;
     -h|--help)
       cat <<'USAGE'
-post-migration.sh v2.4
+post-migration.sh v2.5
 Usage:
   ./post-migration.sh [--postboot] [--verbose|--summary|--quiet] [--no-color] [--log <file>]
 Options:
@@ -115,6 +116,9 @@ done
 case "${FIX_RESUME}" in auto|disable|uuid=?*) ;; *) ce "Invalid --fix-resume: ${FIX_RESUME} (auto|disable|uuid=<UUID>)"; exit 1 ;; esac
 case "${FIX_CDROM}" in keep|comment|nofail) ;; *) ce "Invalid --fix-cdrom: ${FIX_CDROM} (keep|comment|nofail)"; exit 1 ;; esac
 case "${EXTEND_LVM}" in auto|ask|no) ;; *) ce "Invalid --extend-lvm: ${EXTEND_LVM} (auto|ask|no)"; exit 1 ;; esac
+case "${BLACKLIST_FLOPPY}" in yes|no) ;; *) ce "Invalid --blacklist-floppy: ${BLACKLIST_FLOPPY} (yes|no)"; exit 1 ;; esac
+case "${SYNC_FSTAB_SWAP}" in yes|no) ;; *) ce "Invalid --sync-fstab-swap: ${SYNC_FSTAB_SWAP} (yes|no)"; exit 1 ;; esac
+case "${QUIET_BOOT}" in keep|yes|no) ;; *) ce "Invalid --quiet-boot: ${QUIET_BOOT} (keep|yes|no)"; exit 1 ;; esac
 
 require_root
 
@@ -242,6 +246,12 @@ get_swap_uuid_candidates() {
 
 get_current_swap_uuid() {
   local active
+  # FIX (P6): swapon citește /proc/swaps al HOST-ului. Cu --root, swap-ul activ e cel de pe
+  # discul vechi, iar UUID-ul lui suprascria fstab-ul și resume-ul corecte de pe țintă.
+  if [ "$(readlink -f "${ROOT}")" != "/" ]; then
+    get_swap_uuid_candidates | head -n1 || true
+    return
+  fi
   active=$(swapon_show_in_root | awk 'NR>1{print $1; exit}')
   if [ -n "${active:-}" ]; then
     blkid_in_root -s UUID -o value "${active}" | head -n1 || true
@@ -276,8 +286,9 @@ fix_cdrom_fstab() {
       if grep -qE '^\s*/dev/sr0\s+/media/cdrom0\s+udf,iso9660\s+' "${fstab}"; then
         awk '{
           if ($1=="/dev/sr0" && $2=="/media/cdrom0") {
-            if ($4 ~ /nofail/) { sub(/nofail/,"nofail,x-systemd.device-timeout=1s",$4) }
-            else { $4=$4",nofail,x-systemd.device-timeout=1s" }
+            # FIX (P7): idempotent; opțiunea creștea la fiecare rulare.
+            if ($4 !~ /nofail/) { $4=$4",nofail" }
+            if ($4 !~ /x-systemd\.device-timeout=/) { $4=$4",x-systemd.device-timeout=1s" }
           }
           print
         }' "${fstab}" > "${fstab}.tmp" && mv "${fstab}.tmp" "${fstab}"
@@ -370,7 +381,10 @@ clean_grub_resume() {
   sed -i 's/\([[:space:]"]\)resume=[^"[:space:]]*/\1/g' "${grub_def}" || true
   case "${QUIET_BOOT}" in
     yes)
-      if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "${grub_def}"; then
+      # FIX (P8): idempotent; "quiet loglevel=3" se adăuga din nou la fiecare rulare.
+      if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*loglevel=3' "${grub_def}"; then
+        :
+      elif grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "${grub_def}"; then
         sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\([^"]*\)"/GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 \1"/' "${grub_def}"
       else
         echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3"' >> "${grub_def}"
@@ -397,7 +411,7 @@ extend_lvm_volumes() {
   # FIX (A3): LC_ALL=C — în locale cu virgulă zecimală, vgs afișa "5,00g" și
   # strica atât split-ul pe --separator=',' cât și printf %.0f de mai jos.
   local vgs_with_free
-  vgs_with_free=$(LC_ALL=C vgs_in_root --noheadings --units g -o vg_name,vfree --separator=',' --select 'vfree > 1' 2>/dev/null || true)
+  vgs_with_free=$(LC_ALL=C vgs_in_root --noheadings --units g -o vg_name,vfree --separator=',' --select 'vfree > 1g' 2>/dev/null || true)
   
   if [ -z "${vgs_with_free}" ]; then
     _log_write "No VGs found with >1G free space."
@@ -607,6 +621,8 @@ if ! rebuild_boot_artifacts; then
   run_cmd _chroot dpkg --configure -a || true
   if ! rebuild_boot_artifacts; then
     log_error "Still failed to update boot artifacts. See ${LOG}"
+    # FIX (P9): ieșea cu 0 deși initramfs/grub nu erau refăcute.
+    exit 1
   fi
 fi
 

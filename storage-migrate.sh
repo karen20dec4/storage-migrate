@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 #
-# Debian Storage Migration Script V2.11 - two-pass rsync (delta) + boot sanity check;
+# Debian Storage Migration Script V2.12 - audit fixes (mounturi non-bloc excluse, partiții
+#   separate de pe sursă incluse în root, --source-root, exit 23, target guard pe tot arborele);
+#   V2.11 two-pass rsync (delta) + boot sanity check;
 #   V2.10 audit fixes (target in-use guard, multi-VG abort,
 #   LVM space check, INT/TERM cleanup, ask-from-tty, JSON metadata)
 # Author: karen20ced4 + Copilot revisions
 # Repository: https://github.com/karen20dec4/storage-migrate
-# Version: 2.11
-# Date: 2026-07-04
+# Version: 2.12
+# Date: 2026-11-02
 #
 # Scop: migrare disc root si/sau LVM PV intre drive-uri. Include: dry-run, check, resume,
 #        robust fstab update, better device detection, resume for pvmove, metadata save.
 #
-set -euo pipefail
+# FIX (B5): -E = trap-ul ERR se moștenește în funcții; fără el, o eroare `set -e` din
+# migrate_root_disk ieșea fără curățare și lăsa bind-mount-urile în /mnt/newroot.
+set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.11"
-SCRIPT_DATE="2026-07-04"
+SCRIPT_VERSION="2.12"
+SCRIPT_DATE="2026-11-02"
 SCRIPT_AUTHOR="karen20ced4"
 SCRIPT_REPO="https://github.com/karen20dec4/storage-migrate"
 
@@ -57,6 +61,17 @@ ARG_SOURCE=""
 ARG_TARGET=""
 ARG_ROOT_SIZE=""
 ARG_BOOT_MODE=""
+
+# Arborele din care se copiază root-ul. Implicit sistemul live; un backup complet
+# (--source-root) evită citirea unui disc sursă cu sectoare defecte.
+SOURCE_ROOT="/"
+# Continuă în mod non-interactiv chiar dacă rsync nu poate copia unele fișiere (exit 23)
+ALLOW_READ_ERRORS=false
+
+RSYNC_OPTS=(-aAXH --numeric-ids --partial --info=progress2 --delete)
+RSYNC_EXCLUDES=()       # completat de build_rsync_excludes
+FLATTENED_MOUNTS=()     # mountpoint-uri de pe sursă copiate în noul root
+ROOT_USED_GB=0          # completat de compute_root_used_gb
 
 # Dimensiunea ESP (UEFI), în MiB
 ESP_SIZE_MIB=1024
@@ -137,14 +152,17 @@ confirm_action() {
   [[ "$response" =~ ^[Yy] ]]
 }
 
-# prompt_read: prints a prompt and reads input safely; returns default on EOF/empty
+# prompt_read: prints a prompt and reads input safely; returns default on empty input.
+# FIX (B7): la EOF (stdin închis) abandonează. Înainte, valoarea implicită "y" confirma
+# singur discul găsit, iar lista de discuri cerea la infinit o alegere care nu mai vine.
 prompt_read() {
   local prompt="$1"
   local default="${2:-}"
   local input=""
   printf "%b" "$prompt" >&2
-  if ! IFS= read -r input; then
-    input="${default}"
+  if ! IFS= read -r input && [ -z "${input}" ]; then
+    print_error "stdin închis: nu pot citi răspunsul. Folosește --source/--target." >&2
+    exit 1
   fi
   if [ -z "${input}" ] && [ -n "${default}" ]; then
     input="${default}"
@@ -219,29 +237,56 @@ is_current_root_disk() {
   return 1
 }
 
-# FIX (A1): refuză un disc țintă cu partiții în uz (montate / PV LVM / swap activ).
+# FIX (A1): refuză un disc țintă în uz (montat / PV LVM / swap activ / holder).
 # wipefs -a pe discul întreg poate REUȘI chiar dacă partițiile lui sunt montate,
 # distrugând tabela de partiții a unui disc folosit; verificăm proactiv.
+# FIX (B1): verifică TOT arborele lsblk. Înainte erau văzute doar nodurile TYPE=part,
+# deci un filesystem montat direct pe disc sau un LUKS/RAID/LVM trecea drept liber.
 target_disk_in_use() {
-  local disk="$1" part mp
+  local disk="$1" node ntype mp
   cache_all_pvs
-  while IFS= read -r part; do
-    [ -b "${part}" ] || continue
-    mp=$(findmnt -no TARGET "${part}" 2>/dev/null | head -n1 || true)
+  while IFS=' ' read -r node ntype; do
+    [ -b "${node}" ] || continue
+    mp=$(findmnt -no TARGET "${node}" 2>/dev/null | head -n1 || true)
     if [ -n "${mp}" ]; then
-      print_error "Ținta ${disk} este în uz: ${part} este montată la ${mp}."
+      print_error "Ținta ${disk} este în uz: ${node} este montat la ${mp}."
       return 0
     fi
-    if echo "${ALL_PVS_CACHE}" | grep -qxF "${part}"; then
-      print_error "Ținta ${disk} este în uz: ${part} este un PV LVM existent."
+    if echo "${ALL_PVS_CACHE}" | grep -qxF "${node}"; then
+      print_error "Ținta ${disk} este în uz: ${node} este un PV LVM existent."
       return 0
     fi
-    if swapon --noheadings --show=NAME 2>/dev/null | awk '{print $1}' | grep -xqF "${part}"; then
-      print_error "Ținta ${disk} este în uz: ${part} este swap activ."
+    if swapon --noheadings --show=NAME 2>/dev/null | awk '{print $1}' | grep -xqF "${node}"; then
+      print_error "Ținta ${disk} este în uz: ${node} este swap activ."
       return 0
     fi
-  done < <(lsblk -no PATH,TYPE "${disk}" 2>/dev/null | awk '$2=="part" {print $1}')
+    case "${ntype}" in
+      disk|part|loop) ;;
+      *)
+        print_error "Ținta ${disk} este în uz: ${node} este un dispozitiv activ (${ntype})."
+        return 0
+        ;;
+    esac
+  done < <(lsblk -nrpo PATH,TYPE "${disk}" 2>/dev/null)
   return 1
+}
+
+# FIX (B2): --source/--target acceptau și o partiție. --target pe o partiție liberă a
+# discului root trecea de is_current_root_disk (compară discuri) și era ștearsă.
+require_whole_disk() {
+  local dev="$1" label="$2" dtype
+  if [ ! -b "${dev}" ]; then
+    print_error "Disk ${label} invalid (${dev}): nu e un dispozitiv bloc."
+    exit 1
+  fi
+  dtype=$(lsblk -ndo TYPE "${dev}" 2>/dev/null | head -n1 | xargs || true)
+  case "${dtype}" in
+    disk|loop) ;;
+    *)
+      print_error "Disk ${label} invalid (${dev}): este TYPE=${dtype:-necunoscut}, nu un disc întreg."
+      exit 1
+      ;;
+  esac
 }
 
 # select_disk_from_list
@@ -330,7 +375,9 @@ show_progress() {
 
 get_part_name() {
   local disk="$1" idx="$2"
-  if [[ "$disk" =~ nvme ]] || [[ "$disk" =~ mmcblk ]] || [[ "$disk" =~ loop ]]; then
+  # FIX (B8): regula kernelului — discurile cu nume terminat în cifră folosesc separator
+  # "p" (nvme0n1p1, mmcblk0p1, loop0p1, nbd0p1). Lista veche producea /dev/nbd01.
+  if [[ "$disk" =~ [0-9]$ ]]; then
     printf "%sp%s" "$disk" "$idx"
   else
     printf "%s%s" "$disk" "$idx"
@@ -491,7 +538,9 @@ scan_disk_usage() {
     if [ -n "${mp}" ]; then
       mountpoints+=("${part}:${mp}")
       log_message "  Found mountpoint: ${part} → ${mp}"
-      if [ "${mp}" = "/" ]; then
+      # FIX (B9): findmnt întoarce câte o linie per mount; cu `mount --bind / ...`
+      # comparația exactă rata root-ul și sursa era clasificată greșit.
+      if printf '%s\n' "${mp}" | grep -qxF '/'; then
         has_root=true
         root_dev="${part}"
         local size_bytes
@@ -520,14 +569,16 @@ scan_disk_usage() {
   local pvs_str mp_str
   pvs_str=$(IFS=' '; printf '%s' "${pvs_found[*]:-}")
   mp_str=$(IFS=' '; printf '%s' "${mountpoints[*]:-}")
-  echo "has_root='${has_root}'"
-  echo "has_lvm='${has_lvm}'"
-  echo "has_swap='${has_swap}'"
-  echo "root_dev='${root_dev}'"
-  echo "root_size_gb='${root_size_gb}'"
-  echo "swap_size_gb='${swap_size_gb}'"
-  echo "pvs='${pvs_str}'"
-  echo "mountpoints='${mp_str}'"
+  # FIX (B10): %q — output-ul trece prin `eval`, iar numele unui mountpoint vine din
+  # eticheta discului (ex. automount /media/user/<label>) și poate conține ghilimele.
+  printf "has_root=%q\n" "${has_root}"
+  printf "has_lvm=%q\n" "${has_lvm}"
+  printf "has_swap=%q\n" "${has_swap}"
+  printf "root_dev=%q\n" "${root_dev}"
+  printf "root_size_gb=%q\n" "${root_size_gb}"
+  printf "swap_size_gb=%q\n" "${swap_size_gb}"
+  printf "pvs=%q\n" "${pvs_str}"
+  printf "mountpoints=%q\n" "${mp_str}"
 }
 
 detect_source_type() {
@@ -620,9 +671,103 @@ show_disk_list() {
   lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,TYPE | grep -v loop || true
 }
 
+# Spațiul (GiB) ocupat de PV-urile sursă, necesar pe partiția LVM țintă.
+source_lvm_used_gb() {
+  local total=0 pv pv_used
+  if [ "${SOURCE_HAS_LVM}" = true ]; then
+    for pv in "${SOURCE_PVS[@]}"; do
+      pv_used=$(LC_ALL=C pvs --noheadings --units g --nosuffix -o pv_used "${pv}" 2>/dev/null | xargs || echo 0)
+      pv_used="${pv_used%%[.,]*}"
+      [[ "${pv_used}" =~ ^[0-9]+$ ]] || pv_used=0
+      total=$(( total + pv_used + 1 ))
+    done
+  fi
+  echo "${total}"
+}
+
+# FIX (B3): rsync intra și în mounturile non-bloc (ex. overlay-urile Docker din
+# /var/lib/docker/overlay2/*/merged) și dubla datele containerelor. Acum excludem TOATE
+# mountpoint-urile, cu o excepție: partițiile de pe discul SURSĂ (/boot, /home, /var ...)
+# se copiază în noul root și ies din fstab, altfel ar rămâne pe discul care dispare.
+# LV-urile rămân excluse: le mută pvmove, cu tot cu UUID.
+build_rsync_excludes() {
+  RSYNC_EXCLUDES=(--exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile)
+  FLATTENED_MOUNTS=()
+  local mp src dev dtype parent
+  while IFS=' ' read -r mp src; do
+    [ -n "${mp}" ] || continue
+    [ "${mp}" != "/" ] || continue
+    mp=$(printf '%b' "${mp}")   # findmnt -r escapează spațiile ca \x20
+    dev="${src%%\[*}"           # sursă de bind mount: /dev/sda2[/subdir]
+
+    if [ "${mp}" != "/boot/efi" ] && [ "${src}" = "${dev}" ] && [ "${dev}" != "${SOURCE_ROOT_DEV}" ] && [[ "${dev}" == /dev/* ]]; then
+      parent=$(get_parent_disk "${dev}" 2>/dev/null || true)
+      dtype=$(lsblk -ndo TYPE "${dev}" 2>/dev/null | head -n1 | xargs || true)
+      if [ "${parent}" = "${SOURCE_DISK}" ] && [ "${dtype}" = "part" ]; then
+        case "${mp}" in
+          /mnt/*|/media/*)
+            print_warning "${mp} (${dev}) e pe discul sursă, dar /mnt și /media nu se copiază: rămâne pe discul vechi."
+            ;;
+          *)
+            FLATTENED_MOUNTS+=("${mp}")
+            print_warning "${mp} (${dev}) e pe discul sursă: conținutul intră în noul root, linia din fstab va fi comentată."
+            ;;
+        esac
+        continue
+      fi
+    fi
+
+    if [ "${SOURCE_ROOT}" = "/" ]; then
+      RSYNC_EXCLUDES+=("--exclude=${mp}/*")
+      log_message "Mountpoint exclus din rsync: ${mp} (${src})"
+    fi
+  done < <(findmnt -rno TARGET,SOURCE 2>/dev/null)
+
+  if [ "${SOURCE_ROOT}" != "/" ] && [ "${#FLATTENED_MOUNTS[@]}" -gt 0 ]; then
+    print_error "--source-root nu suportă partiții separate pe discul sursă (${FLATTENED_MOUNTS[*]}): nu sunt în backup."
+    return 1
+  fi
+}
+
+# Spațiul (GiB) pe care îl va ocupa noul root.
+compute_root_used_gb() {
+  local bytes=0 b mp
+  if [ "${SOURCE_ROOT}" != "/" ]; then
+    bytes=$(du -sxB1 "${SOURCE_ROOT}" 2>/dev/null | awk '{print $1}' || true)
+  else
+    for mp in / "${FLATTENED_MOUNTS[@]}"; do
+      b=$(df -B1 --output=used "${mp}" 2>/dev/null | awk 'NR==2 {print $1}' || true)
+      bytes=$(( bytes + ${b:-0} ))
+    done
+  fi
+  ROOT_USED_GB=$(( (${bytes:-0} + 1024**3 - 1) / 1024**3 ))
+  log_message "Spațiu necesar pentru root: ${ROOT_USED_GB} GiB (din ${SOURCE_ROOT})"
+}
+
+# Root-ul maxim care încape lângă swap, LVM și ESP + marja GPT (2 GiB).
+max_root_size_gb() {
+  local disk_gb="$1" swap="${SOURCE_SWAP_SIZE_GB:-0}"
+  [ "${swap}" -ge 1 ] || swap=1
+  echo $(( disk_gb - swap - $(source_lvm_used_gb) - 2 ))
+}
+
+source_holds_boot() {
+  is_current_root_disk "${SOURCE_DISK}" && return 0
+  local mp dev
+  for mp in /boot /boot/efi; do
+    dev=$(findmnt -no SOURCE "${mp}" 2>/dev/null || true)
+    [ -n "${dev}" ] || continue
+    if [ "$(get_parent_disk "${dev%%\[*}" 2>/dev/null || true)" = "${SOURCE_DISK}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 validate_root_size() {
   local size="$1"
   local target_disk_size="$2"
+  local max_size min_size
 
   if ! [[ "${size}" =~ ^[0-9]+$ ]]; then
     print_error "Mărimea root trebuie să fie un număr întreg!"
@@ -632,9 +777,17 @@ validate_root_size() {
     print_error "Mărimea root trebuie să fie cel puțin 10GB!"
     return 1
   fi
-  if [ "${size}" -gt $((target_disk_size - 5)) ]; then
+  # FIX (B4): maximul ține cont de ESP, swap și LVM, iar minimul de datele care trebuie
+  # să încapă. Înainte, ENOSPC apărea în rsync, după ce discul țintă fusese șters.
+  max_size=$(max_root_size_gb "${target_disk_size}")
+  if [ "${size}" -gt "${max_size}" ]; then
     print_error "Mărimea root (${size}GB) este prea mare pentru disk-ul destinație (${target_disk_size}GB)!"
-    print_info "Spațiu disponibil maxim: $((target_disk_size - 5))GB"
+    print_info "Spațiu disponibil maxim: ${max_size}GB"
+    return 1
+  fi
+  min_size=$(( ROOT_USED_GB * 105 / 100 + 1 ))
+  if [ "${size}" -lt "${min_size}" ]; then
+    print_error "Mărimea root (${size}GB) nu încape datele copiate (~${ROOT_USED_GB}GB, minim ${min_size}GB)!"
     return 1
   fi
   return 0
@@ -688,20 +841,11 @@ check_disk_space() {
     # FIX (A3): estimează spațiul REAL necesar (root folosit + PV-uri LVM folosite
     # + swap); înainte, migrarea lvm-only spre un disc mai mic era doar avertizată
     # și eșua abia în timpul pvmove.
-    local needed_gb=0 used_space_gb pv pv_used
+    local needed_gb=0
     if [ "${SOURCE_HAS_ROOT}" = true ]; then
-      used_space_gb=$(df --block-size=1G "${SOURCE_ROOT_DEV}" 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
-      [[ "${used_space_gb}" =~ ^[0-9]+$ ]] || used_space_gb=0
-      needed_gb=$(( needed_gb + used_space_gb ))
+      needed_gb=$(( needed_gb + ROOT_USED_GB ))
     fi
-    if [ "${SOURCE_HAS_LVM}" = true ]; then
-      for pv in "${SOURCE_PVS[@]}"; do
-        pv_used=$(LC_ALL=C pvs --noheadings --units g --nosuffix -o pv_used "${pv}" 2>/dev/null | xargs || echo 0)
-        pv_used="${pv_used%%[.,]*}"
-        [[ "${pv_used}" =~ ^[0-9]+$ ]] || pv_used=0
-        needed_gb=$(( needed_gb + pv_used + 1 ))
-      done
-    fi
+    needed_gb=$(( needed_gb + $(source_lvm_used_gb) ))
     needed_gb=$(( needed_gb + ${SOURCE_SWAP_SIZE_GB:-0} ))
     if [ "${tgt_size}" -gt "${needed_gb}" ]; then
       print_info "Dar spațiul folosit estimat (~${needed_gb}GB: root+LVM+swap) încape pe destinație"
@@ -826,9 +970,13 @@ show_dry_run_lvm() {
   log_command parted -s "${TARGET_DISK}" set 1 lvm on || true
   local target_part; target_part=$(get_part_name "${TARGET_DISK}" 1)
   log_command pvcreate -ff -y "${target_part}" || true
+  local vg_extended=""
   for pv in "${SOURCE_PVS[@]}"; do
     local vg; vg=$(pvs --noheadings -o vg_name "${pv}" 2>/dev/null | xargs)
-    log_command vgextend "${vg}" "${target_part}" || true
+    if [ "${vg_extended}" != "${vg}" ]; then
+      log_command vgextend "${vg}" "${target_part}" || true
+      vg_extended="${vg}"
+    fi
     log_command pvmove -i 5 "${pv}" "${target_part}" || true
     log_command vgreduce "${vg}" "${pv}" || true
   done
@@ -878,19 +1026,11 @@ show_dry_run_root() {
     fi
   fi
 
-  local rsync_excludes=(--partial --info=progress2 --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile)
-  # Reflectă în dry-run aceleași excluderi ca migrarea reală: orice mountpoint separat.
-  local _mp _src
-  while IFS=' ' read -r _mp _src; do
-    [ -z "${_mp}" ] && continue
-    [ "${_mp}" = "/" ] && continue
-    case "${_src}" in /dev/*) ;; *) continue ;; esac
-    rsync_excludes+=(--exclude="${_mp}/*")
-  done < <(findmnt -rno TARGET,SOURCE 2>/dev/null)
+  # Aceleași opțiuni și excluderi ca migrarea reală (build_rsync_excludes).
   # IMP (I1): două treceri rsync (a doua = delta pentru schimbările din timpul primei)
-  log_command rsync -aAXH --delete "${rsync_excludes[@]}" / /mnt/newroot || true
-  log_command rsync -aAXH --delete "${rsync_excludes[@]}" / /mnt/newroot || true
-  log_command cp /etc/default/grub /mnt/newroot/etc/default/grub || true
+  log_command rsync "${RSYNC_OPTS[@]}" "${RSYNC_EXCLUDES[@]}" "${SOURCE_ROOT%/}/" /mnt/newroot || true
+  log_command rsync "${RSYNC_OPTS[@]}" "${RSYNC_EXCLUDES[@]}" "${SOURCE_ROOT%/}/" /mnt/newroot || true
+  log_command cp "${SOURCE_ROOT%/}/etc/default/grub" /mnt/newroot/etc/default/grub || true
   if [ "${BOOT_MODE}" = "UEFI" ]; then
     log_command grub-install --target=x86_64-efi --efi-directory=/boot/efi --recheck --no-nvram || true
   else
@@ -971,6 +1111,62 @@ verify_boot_artifacts() {
   return 1
 }
 
+# IMP (I1): două treceri rsync. Prima (lungă) copiază masiv; a doua (delta,
+# de obicei secunde) prinde fișierele modificate pe sistemul live ÎN TIMPUL
+# primei treceri — reduce fereastra de inconsistență de la ore la secunde.
+# --delete pe delta face ținta fidelă sursei (fișierele excluse sunt protejate).
+# FIX (B6): exit 23 (fișiere necopiate, ex. sector defect) nu mai aruncă ore de copiere
+# la gunoi, dar nici nu trece tăcut: lista merge în BACKUP_DIR și decide utilizatorul.
+sync_root_filesystem() {
+  local dest="$1"
+  local rsync_exit=0 rsync_pass log_offset=0
+  local failed_log="${BACKUP_DIR}/rsync-failed-files.log" failed_count
+  for rsync_pass in "trecere 1/2 (copiere masivă)" "trecere 2/2 (delta)"; do
+    print_info "Rsync ${rsync_pass}..."
+    log_offset=$(stat -c %s "${LOG_FILE}" 2>/dev/null || echo 0)
+    if log_interactive_command rsync "${RSYNC_OPTS[@]}" "${RSYNC_EXCLUDES[@]}" "${SOURCE_ROOT%/}/" "${dest}"; then
+      rsync_exit=0
+    else
+      rsync_exit=$?
+    fi
+    case "${rsync_exit}" in
+      0) ;;
+      24)
+        print_warning "Rsync (${rsync_pass}) a raportat fișiere dispărute (exit 24), dar migrarea continuă."
+        log_message "Rsync pass '${rsync_pass}' completed with exit code 24 - continuing"
+        ;;
+      23)
+        print_warning "Rsync (${rsync_pass}) nu a copiat toate fișierele (exit 23)."
+        log_message "Rsync pass '${rsync_pass}' completed with exit code 23"
+        ;;
+      *)
+        print_error "Eroare la rsync (${rsync_pass}, exit code: ${rsync_exit})"
+        return 1
+        ;;
+    esac
+  done
+
+  # Contează doar ultima trecere: a doua poate recupera ce a ratat prima.
+  [ "${rsync_exit}" -eq 23 ] || return 0
+
+  mkdir -p "${BACKUP_DIR}"
+  tail -c "+$(( log_offset + 1 ))" "${LOG_FILE}" | tr '\r' '\n' | grep -oE 'rsync: .*' > "${failed_log}" || true
+  failed_count=$(wc -l < "${failed_log}")
+  print_warning "${failed_count} erori rsync, lista completă: ${failed_log}"
+  head -n 10 "${failed_log}"
+
+  if [ "${ALLOW_READ_ERRORS}" = true ]; then
+    print_warning "Continui cu fișiere lipsă (--allow-read-errors)."
+    log_message "Continuing with ${failed_count} rsync errors (--allow-read-errors)"
+    return 0
+  fi
+  if [ "${ASSUME_YES}" = true ]; then
+    print_error "Fișiere necopiate: oprire. Adaugă --allow-read-errors dacă lipsa lor e acceptabilă."
+    return 1
+  fi
+  confirm_action "Noul sistem nu va avea aceste fișiere. Continui?" "no"
+}
+
 migrate_lvm_pv() {
   print_info "Începe migrare LVM PV..."
   CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -990,14 +1186,20 @@ migrate_lvm_pv() {
   log_command pvcreate -ff -y "${target_pv}" || { print_error "Eroare la pvcreate"; return 1; }
   print_success "PV creat: ${target_pv}"
 
+  # FIX (B11): vgextend o singură dată per VG. Cu două PV-uri ale aceluiași VG pe sursă,
+  # al doilea vgextend eșua ("already in volume group") după ce primul pvmove se terminase.
+  local vg_extended=""
   for source_pv in "${SOURCE_PVS[@]}"; do
     local vg_name; vg_name=$(pvs --noheadings -o vg_name "${source_pv}" 2>/dev/null | xargs)
     if [ -z "${vg_name}" ]; then print_warning "Nu am putut determina VG pentru ${source_pv}"; continue; fi
 
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Extindere VG '${vg_name}'"
-    log_command vgextend "${vg_name}" "${target_pv}" || { print_error "Eroare la vgextend"; return 1; }
-    print_success "VG '${vg_name}' extins"
+    if [ "${vg_extended}" != "${vg_name}" ]; then
+      CURRENT_STEP=$((CURRENT_STEP + 1))
+      print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Extindere VG '${vg_name}'"
+      log_command vgextend "${vg_name}" "${target_pv}" || { print_error "Eroare la vgextend"; return 1; }
+      print_success "VG '${vg_name}' extins"
+      vg_extended="${vg_name}"
+    fi
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
     print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Mutare date: ${source_pv} → ${target_pv} (pvmove)"
@@ -1024,8 +1226,12 @@ migrate_lvm_pv() {
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
     print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Eliminare PV vechi din VG"
-    log_command vgreduce "${vg_name}" "${source_pv}" || print_warning "vgreduce a eșuat; verifică manual"
-    print_success "PV ${source_pv} eliminat din VG '${vg_name}'"
+    # FIX (B12): succesul se afișa și când vgreduce eșuase.
+    if log_command vgreduce "${vg_name}" "${source_pv}"; then
+      print_success "PV ${source_pv} eliminat din VG '${vg_name}'"
+    else
+      print_warning "vgreduce a eșuat; verifică manual"
+    fi
   done
 
   print_success "Migrare LVM completă!"
@@ -1064,6 +1270,9 @@ migrate_root_disk() {
       required_mib=$(( 1 + esp_mib + root_mib + swap_mib ))
     else
       required_mib=$(( 2 + root_mib + swap_mib ))
+    fi
+    if [ "${is_full}" = true ]; then
+      required_mib=$(( required_mib + $(source_lvm_used_gb) * 1024 ))
     fi
     if [ "${disk_mib}" -gt 0 ] && [ "${required_mib}" -ge $(( disk_mib - 16 )) ]; then
       print_error "Schema (boot+root+swap = ${required_mib}MiB) nu încape pe disc (${disk_mib}MiB)."
@@ -1154,41 +1363,10 @@ migrate_root_disk() {
   log_command mount "${TARGET_ROOT}" /mnt/newroot || { print_error "Eroare la montare ${TARGET_ROOT}"; return 1; }
   mkdir -p /mnt/newroot/{dev,proc,sys,run,boot,tmp}
 
-  local rsync_excludes_list=(--exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile)
-  # FIX: exclude din rsync ORICE filesystem montat separat sub / (pe alt disc/partiție):
-  # /data, /home, /boot, /boot/efi etc. Datele lor stau pe partițiile proprii și NU trebuie
-  # copiate în noul root (l-ar umfla sau depăși). Directorul punct-de-montare rămâne gol,
-  # iar fstab-ul le remontează după boot. (Versiunea veche excludea doar /home.)
-  local _mp _src
-  while IFS=' ' read -r _mp _src; do
-    [ -z "${_mp}" ] && continue
-    [ "${_mp}" = "/" ] && continue
-    case "${_src}" in /dev/*) ;; *) continue ;; esac
-    rsync_excludes_list+=(--exclude="${_mp}/*")
-    print_info "Mountpoint separat exclus din rsync: ${_mp} (rămâne pe ${_src})"
-  done < <(findmnt -rno TARGET,SOURCE 2>/dev/null)
-
-  # IMP (I1): două treceri rsync. Prima (lungă) copiază masiv; a doua (delta,
-  # de obicei secunde) prinde fișierele modificate pe sistemul live ÎN TIMPUL
-  # primei treceri — reduce fereastra de inconsistență de la ore la secunde.
-  # --delete pe delta face ținta fidelă sursei (fișierele excluse sunt protejate).
-  local rsync_exit=0 rsync_pass
-  for rsync_pass in "trecere 1/2 (copiere masivă)" "trecere 2/2 (delta)"; do
-    print_info "Rsync ${rsync_pass}..."
-    if log_interactive_command rsync -aAXH --partial --info=progress2 --delete "${rsync_excludes_list[@]}" / /mnt/newroot; then
-      rsync_exit=0
-    else
-      rsync_exit=$?
-      if [ "${rsync_exit}" -eq 24 ]; then
-        print_warning "Rsync (${rsync_pass}) a raportat fișiere dispărute (exit 24), dar migrarea continuă."
-        log_message "Rsync pass '${rsync_pass}' completed with exit code 24 - continuing"
-      else
-        print_error "Eroare la rsync (${rsync_pass}, exit code: ${rsync_exit})"
-        cleanup_mounts /mnt/newroot
-        return 1
-      fi
-    fi
-  done
+  if ! sync_root_filesystem /mnt/newroot; then
+    cleanup_mounts /mnt/newroot
+    return 1
+  fi
   print_success "Sistem sincronizat (2 treceri)."
 
   print_info "Montare pseudo-filesystems..."
@@ -1211,8 +1389,8 @@ migrate_root_disk() {
 
   CURRENT_STEP=$((CURRENT_STEP + 1))
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Copiere configurație GRUB"
-  if [ -f /etc/default/grub ]; then
-    log_command cp /etc/default/grub /mnt/newroot/etc/default/ || true
+  if [ -f "${SOURCE_ROOT%/}/etc/default/grub" ]; then
+    log_command cp "${SOURCE_ROOT%/}/etc/default/grub" /mnt/newroot/etc/default/ || true
     # FIX (G2): elimină orice resume= învechit din linia de kernel (swap-ul se schimbă)
     if [ -f /mnt/newroot/etc/default/grub ]; then
       sed -i 's/\([[:space:]"]\)resume=[^"[:space:]]*/\1/g' \
@@ -1238,10 +1416,13 @@ migrate_root_disk() {
       cleanup_mounts /mnt/newroot
       return 1
     fi
-    if [ -d /boot/efi ] && [ "$(ls -A /boot/efi 2>/dev/null)" ]; then
+    # Un backup făcut cu -x are /boot/efi gol: în acel caz copiem ESP-ul live.
+    local esp_source="${SOURCE_ROOT%/}/boot/efi"
+    [ -n "$(ls -A "${esp_source}" 2>/dev/null)" ] || esp_source="/boot/efi"
+    if [ -d "${esp_source}" ] && [ "$(ls -A "${esp_source}" 2>/dev/null)" ]; then
       # FIX (A7): FAT32 nu suportă owner/ACL/xattr/hardlink; -aAXH genera erori
       # (mascate de || true). Pe ESP e suficient conținut + timestamp.
-      log_command rsync -rt /boot/efi/ /mnt/newroot/boot/efi/ || true
+      log_command rsync -rt "${esp_source}/" /mnt/newroot/boot/efi/ || true
     fi
     if ! log_command chroot /mnt/newroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck --no-nvram; then
       print_error "Eroare la instalare GRUB UEFI"
@@ -1316,8 +1497,11 @@ migrate_root_disk() {
       -v swap_uuid="${new_swap_uuid}" \
       -v esp_uuid="${new_esp_uuid}" \
       -v boot_mode="${BOOT_MODE}" \
-      ' /^[[:space:]]*#/ { print; next }
+      -v flattened="$(printf '%s\n' "${FLATTENED_MOUNTS[@]}")" \
+      ' BEGIN { n = split(flattened, fl, "\n"); for (i = 1; i <= n; i++) if (fl[i] != "") flat[fl[i]] = 1 }
+        /^[[:space:]]*#/ { print; next }
         NF == 0 { print; next }
+        ($2 in flat) { print "# inclus in root de storage-migrate: " $0; next }
         ($2 == "/") { $1 = "UUID=" root_uuid; print; next }
         ($3 == "swap") { if (swap_uuid) { $1 = "UUID=" swap_uuid; print; } else { print; } next }
         ($2 == "/boot/efi") {
@@ -1434,7 +1618,7 @@ migrate_root_disk() {
         return 1
       fi
       rm -f "${RESUME_FILE}"
-      log_command vgreduce "${vg}" "${source_pv}" || print_warning "vgreduce warning"
+      log_command vgreduce "${vg}" "${source_pv}" || print_warning "vgreduce a eșuat; verifică manual"
     done
   fi
 
@@ -1451,6 +1635,9 @@ main() {
       --check) CHECK_MODE=true ;;
       --debug) DEBUG_MODE=true ;;
       --yes|-y) ASSUME_YES=true ;;
+      --allow-read-errors) ALLOW_READ_ERRORS=true ;;
+      --source-root=*) SOURCE_ROOT="$(read_cli_value "--source-root" "${_val}")" ;;
+      --source-root)   SOURCE_ROOT="$(read_cli_value "$1" "${2-}")"; shift ;;
       --source=*) ARG_SOURCE="$(read_cli_value "--source" "${_val}")" ;;
       --source)   ARG_SOURCE="$(read_cli_value "$1" "${2-}")"; shift ;;
       --target=*) ARG_TARGET="$(read_cli_value "--target" "${_val}")" ;;
@@ -1469,6 +1656,8 @@ Opțiuni generale:
   --check            Pre-validează migrarea fără execuție (dry-run sigur)
   --resume           Reia o operațiune pvmove LVM eșuată
   --debug            Logging detaliat și diagnostice suplimentare
+  --source-root <dir>  Copiază root-ul dintr-un backup complet în loc de / (disc sursă defect)
+  --allow-read-errors  Cu --yes: continuă dacă rsync nu poate copia unele fișiere (exit 23)
   --help             Afișează acest mesaj
 
 Mod NON-INTERACTIV (toate confirmările sunt sărite):
@@ -1497,7 +1686,17 @@ EOF
     print_warning "Ai dat --source/--target dar nu --yes: confirmările vor fi cerute interactiv."
   fi
 
-  clear
+  # FIX (B13): verificarea de root era după --resume (care rula pvmove fără ea).
+  if [ "${EUID}" -ne 0 ]; then print_error "Scriptul trebuie rulat ca root!"; exit 1; fi
+
+  SOURCE_ROOT=$(readlink -f "${SOURCE_ROOT}")
+  if [ "${SOURCE_ROOT}" != "/" ] && { [ ! -f "${SOURCE_ROOT}/etc/fstab" ] || [ ! -d "${SOURCE_ROOT}/boot" ]; }; then
+    print_error "--source-root ${SOURCE_ROOT}: nu pare un sistem complet (lipsesc etc/fstab sau boot/)."
+    exit 1
+  fi
+
+  # FIX (B14): fără TERM (cron, ssh fără tty) `clear` eșua și oprea scriptul prin set -e.
+  clear 2>/dev/null || true
   print_header
   setup_logging
 
@@ -1528,7 +1727,6 @@ EOF
     fi
   fi
 
-  if [ "${EUID}" -ne 0 ]; then print_error "Scriptul trebuie rulat ca root!"; exit 1; fi
   mkdir -p "${BACKUP_DIR}"
 
   CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -1570,6 +1768,9 @@ EOF
     print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Detectare root curent"
     CURRENT_ROOT_DEV=$(findmnt -no SOURCE /)
     if [ -z "${CURRENT_ROOT_DEV}" ]; then print_error "Nu pot detecta root device!"; exit 1; fi
+    # FIX (B15): btrfs raportează /dev/sda2[/@rootfs]; netăiat, discul root nu era
+    # recunoscut și putea fi ales ca țintă.
+    CURRENT_ROOT_DEV="${CURRENT_ROOT_DEV%%\[*}"
     detect_current_root_disks "${CURRENT_ROOT_DEV}"
     if [ "${#CURRENT_ROOT_DISKS[@]}" -gt 0 ]; then
       CURRENT_ROOT_DISK="${CURRENT_ROOT_DISKS[0]}"
@@ -1578,6 +1779,10 @@ EOF
       if [ -n "${pkname}" ]; then CURRENT_ROOT_DISK="/dev/${pkname}"; else CURRENT_ROOT_DISK=$(echo "${CURRENT_ROOT_DEV}" | sed -E 's/p?[0-9]+$//'); fi
       CURRENT_ROOT_DISK=$(readlink -f "${CURRENT_ROOT_DISK}" 2>/dev/null || echo "${CURRENT_ROOT_DISK}")
       add_unique_root_disk "${CURRENT_ROOT_DISK}"
+    fi
+    if [ ! -b "${CURRENT_ROOT_DISKS[0]:-}" ]; then
+      print_error "Nu pot determina discul root (${CURRENT_ROOT_DEV}): nu pot proteja ținta."
+      exit 1
     fi
     print_success "Root curent: ${BOLD}${CURRENT_ROOT_DEV}${NC} pe ${BOLD}${CURRENT_ROOT_DISKS[*]}${NC}"
 
@@ -1592,7 +1797,7 @@ EOF
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Selectare disk SURSĂ (cel care va fi înlocuit)"
   if [ -n "${ARG_SOURCE}" ]; then
     # Non-interactiv: validează --source
-    if [ ! -b "${ARG_SOURCE}" ]; then print_error "Disk SURSĂ invalid (--source ${ARG_SOURCE}): nu e un dispozitiv bloc."; exit 1; fi
+    require_whole_disk "${ARG_SOURCE}" "SURSĂ"
     SOURCE_DISK=$(readlink -f "${ARG_SOURCE}")
     print_success "Sursă (din argument): ${SOURCE_DISK}"
   else
@@ -1613,7 +1818,7 @@ EOF
   print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Selectare disk DESTINAȚIE (noul disk)"
   if [ -n "${ARG_TARGET}" ]; then
     # Non-interactiv: validează --target
-      if [ ! -b "${ARG_TARGET}" ]; then print_error "Disk DESTINAȚIE invalid (--target ${ARG_TARGET}): nu e un dispozitiv bloc."; exit 1; fi
+      require_whole_disk "${ARG_TARGET}" "DESTINAȚIE"
       TARGET_DISK=$(readlink -f "${ARG_TARGET}")
       if [ "${SOURCE_DISK}" = "${TARGET_DISK}" ]; then print_error "Sursa și ținta sunt identice (${TARGET_DISK})."; exit 1; fi
       if is_current_root_disk "${TARGET_DISK}"; then print_error "Ținta nu poate fi un disc root curent (${CURRENT_ROOT_DISKS[*]})."; exit 1; fi
@@ -1666,13 +1871,41 @@ EOF
     exit 1
   fi
 
+  if [ "${MIGRATION_TYPE}" = "lvm-only" ]; then
+    if [ "${SOURCE_ROOT}" != "/" ]; then
+      print_error "--source-root se aplică doar migrărilor root; LVM-ul se mută cu pvmove."
+      exit 1
+    fi
+    # FIX (B16): root pe LVM + /boot sau ESP pe sursă se clasifică lvm-only. pvmove mută
+    # doar LV-urile; dacă scoți discul vechi, /boot, ESP și GRUB dispar cu el.
+    if source_holds_boot; then
+      print_warning "${SOURCE_DISK} conține root-ul sau /boot: pvmove NU mută /boot, ESP și GRUB."
+      print_warning "După migrare sistemul pornește în continuare de pe ${SOURCE_DISK}: nu îl scoate!"
+      if [ "${CHECK_MODE}" = false ]; then
+        if [ "${ASSUME_YES}" = true ]; then
+          print_error "Refuz în mod --yes: confirmă interactiv sau mută manual boot-ul."
+          exit 1
+        fi
+        if ! confirm_action "Continui știind că discul sursă rămâne necesar la boot?" "no"; then
+          print_info "Anulat."
+          exit 0
+        fi
+      fi
+    fi
+  fi
+
   if [[ "${MIGRATION_TYPE}" == "root-only" || "${MIGRATION_TYPE}" == "full-disk" ]]; then
     CURRENT_STEP=$((CURRENT_STEP + 1))
     print_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "Configurare mărime partiție root"
+    build_rsync_excludes || exit 1
+    compute_root_used_gb
     local default_root_size=${SOURCE_ROOT_SIZE_GB:-37}
-    local target_disk_info target_disk_size
+    local target_disk_info target_disk_size max_root_gb
     target_disk_info=$(get_disk_info "${TARGET_DISK}")
     IFS='|' read -r target_disk_size _ _ <<< "${target_disk_info}"
+    # Pe un disc de aceeași mărime, root-ul sursă + ESP + swap poate depăși discul.
+    max_root_gb=$(max_root_size_gb "${target_disk_size}")
+    [ "${default_root_size}" -le "${max_root_gb}" ] || default_root_size="${max_root_gb}"
 
     if [ -n "${ARG_ROOT_SIZE}" ]; then
       # Non-interactiv: validează --root-size
@@ -1687,7 +1920,7 @@ EOF
       if ! validate_root_size "${TARGET_ROOT_SIZE_GB}" "${target_disk_size}"; then
         print_error "Mărimea root implicită (${default_root_size} GiB) nu e validă pentru discul țintă (${target_disk_size} GB). Folosește --root-size."; exit 1
       fi
-      print_info "Mod non-interactiv: folosesc mărimea root implicită ${BOLD}${TARGET_ROOT_SIZE_GB} GiB${NC} (= sursă)."
+      print_info "Mod non-interactiv: folosesc mărimea root implicită ${BOLD}${TARGET_ROOT_SIZE_GB} GiB${NC} (sursa sau maximul care încape)."
     else
       while true; do
         read -rp "$(echo -e ${CYAN}Introdu mărimea pentru noua partiție root GiB [Default: ${default_root_size}]: ${NC})" user_root_size
@@ -1779,7 +2012,14 @@ EOF
     echo -e "  1) Oprește serverul: ${DIM}sudo poweroff${NC}"
     echo -e "  2) Înlocuiește fizic discul: scoate ${SOURCE_DISK} și pune ${TARGET_DISK} în locul său"
     echo -e "  3) Pornește serverul și verifică boot-ul"
-    echo -e "  4) După boot, verifică: ${DIM}df -h; lsblk; mount | grep ' / '${NC}\n"
+    echo -e "  4) După boot, verifică: ${DIM}df -h; lsblk; mount | grep ' / '${NC}"
+    if [ "${BOOT_MODE}" = "UEFI" ]; then
+      # FIX (B17): intrările NVRAM vizează PARTUUID-ul ESP-ului vechi; primul boot depinde
+      # de fallback-ul firmware la \EFI\BOOT\BOOTX64.EFI.
+      echo -e "  5) Dacă firmware-ul nu găsește discul, alege-l din meniul de boot. După boot refă intrarea NVRAM:"
+      echo -e "     ${DIM}grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck${NC}"
+    fi
+    echo ""
     echo -e "${YELLOW}Nu șterge inca discul ${SOURCE_DISK} nu se stie niciodata :)${NC}\n"
   else
     echo -e "${GREEN}${BOLD}Status LVM final:${NC}"
@@ -1800,7 +2040,11 @@ EOF
 
 # FIX (M5): la eroare, curăță mount-urile rămase din /mnt/newroot înainte de a ieși.
 cleanup_on_error() {
-  local rc=$?
+  local rc="${1:-$?}"
+  # Cu set -E trap-ul rulează și în subshell-uri ($(...), <(...)). Doar shell-ul principal
+  # are voie să demonteze: o comandă eșuată într-un subshell nu oprește neapărat scriptul.
+  if [ "${BASHPID}" != "$$" ]; then exit "${rc}"; fi
+  trap - ERR
   local line="${BASH_LINENO[0]:-?}"
   print_error "Script întrerupt (cod ${rc}) în jurul liniei ${line}"
   log_message "ERROR (rc=${rc}) near line ${line}"
@@ -1808,12 +2052,14 @@ cleanup_on_error() {
     print_warning "Curăț mount-urile temporare rămase din /mnt/newroot..."
     cleanup_mounts /mnt/newroot 2>/dev/null || true
   fi
-  exit "${rc:-1}"
+  exit "${rc}"
 }
 trap cleanup_on_error ERR
 # FIX (A8): și la Ctrl+C / kill curăță mount-urile din /mnt/newroot (înainte,
 # o întrerupere în timpul rsync lăsa pseudo-fs-urile bind-montate în urmă).
-trap cleanup_on_error INT TERM
+# Codul e explicit: $? putea fi 0 la semnal, iar scriptul ieșea cu succes.
+trap 'cleanup_on_error 130' INT
+trap 'cleanup_on_error 143' TERM
 
 main "$@"
 exit 0
