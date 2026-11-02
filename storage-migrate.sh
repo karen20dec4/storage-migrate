@@ -68,7 +68,9 @@ SOURCE_ROOT="/"
 # Continuă în mod non-interactiv chiar dacă rsync nu poate copia unele fișiere (exit 23)
 ALLOW_READ_ERRORS=false
 
-RSYNC_OPTS=(-aAXH --numeric-ids --partial --info=progress2 --delete)
+# --no-inc-recursive: rsync listează întâi toate fișierele, deci procentul din progress2
+# e corect de la început (altfel scade când descoperă directoare noi).
+RSYNC_OPTS=(-aAXH --numeric-ids --partial --info=progress2 --no-inc-recursive --delete)
 RSYNC_EXCLUDES=()       # completat de build_rsync_excludes
 FLATTENED_MOUNTS=()     # mountpoint-uri de pe sursă copiate în noul root
 ROOT_USED_GB=0          # completat de compute_root_used_gb
